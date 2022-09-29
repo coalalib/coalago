@@ -14,7 +14,7 @@ var (
 const (
 	SESSIONS_POOL_EXPIRATION = time.Second * 60 * 2
 	MAX_PAYLOAD_SIZE         = 1024
-	DEFAULT_WINDOW_SIZE      = 70
+	DEFAULT_WINDOW_SIZE      = 350
 	MTU                      = 1500
 )
 
