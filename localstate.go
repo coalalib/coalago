@@ -4,13 +4,10 @@ import (
 	"fmt"
 	log "github.com/ndmsystems/golog"
 	"github.com/patrickmn/go-cache"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 )
-
-var file *os.File
 
 var StorageLocalStates = cache.New(sumTimeAttempts, time.Second)
 

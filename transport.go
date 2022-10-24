@@ -225,18 +225,19 @@ func (sr *transport) sendPackets(packets []*packet, windowsize *int, shift int, 
 				if err := sr.sendToSocket(packets[i].message); err != nil {
 					return err
 				}
+
 			}
 		} else {
 			acked++
 		}
 	}
 	/*
-	if len(packets) == stop {
-		if time.Since(packets[len(packets)-1].lastSend) >= timeWait {
-			MetricExpiredMessages.Inc()
-			return ErrMaxAttempts
-		}
-	}*/
+		if len(packets) == stop {
+			if time.Since(packets[len(packets)-1].lastSend) >= timeWait {
+				MetricExpiredMessages.Inc()
+				return ErrMaxAttempts
+			}
+		}*/
 
 	return nil
 }
@@ -386,7 +387,7 @@ func (sr *transport) sendARQBlock1CON(message *CoAPMessage) (*CoAPMessage, error
 	state.origMessage = message
 	state.blockSize = MAX_PAYLOAD_SIZE
 	numblocks := math.Ceil(float64(state.lenght) / float64(MAX_PAYLOAD_SIZE))
-	if numblocks < float64(DEFAULT_WINDOW_SIZE) {
+	if int(numblocks) < DEFAULT_WINDOW_SIZE {
 		state.windowsize = int(numblocks)
 	} else {
 		state.windowsize = DEFAULT_WINDOW_SIZE
@@ -422,6 +423,10 @@ func (sr *transport) sendARQBlock1CON(message *CoAPMessage) (*CoAPMessage, error
 
 	for {
 		resp, err := receiveMessage(sr, message)
+		if resp == nil {
+			println("nil")
+		}
+		//println(resp.Code)
 		if err != nil {
 			if err == ErrMaxAttempts {
 				if err = sr.sendPackets(packets, &state.windowsize, shift, relative_shift, &localMetricsRetransmitMessages, &overflowIndicator); err != nil {
@@ -448,6 +453,7 @@ func (sr *transport) sendARQBlock1CON(message *CoAPMessage) (*CoAPMessage, error
 				// 	sr.sendPacketsByWindowOffset(packets, state.windowsize, shift, block.BlockNumber, int(wo.Value.(uint32)))
 				// }
 				if len(packets) >= block.BlockNumber {
+					//println(block.BlockNumber)
 					balancerCounter++
 					if resp.Code != CoapCodeContinue {
 						log.Info(fmt.Sprintf("U/D: %s, %s, Packets: %d Lost: %d, WindowSize: %d",
@@ -456,6 +462,7 @@ func (sr *transport) sendARQBlock1CON(message *CoAPMessage) (*CoAPMessage, error
 							len(packets),
 							localMetricsRetransmitMessages,
 							state.windowsize))
+						//println(resp.Code)
 						return resp, nil
 					}
 					if !packets[block.BlockNumber].acked && packets[block.BlockNumber].attempts > 3 {
@@ -506,7 +513,7 @@ func (sr *transport) sendARQBlock2ACK(input chan *CoAPMessage, message *CoAPMess
 	state.origMessage = message
 	state.blockSize = MAX_PAYLOAD_SIZE
 	numblocks := math.Ceil(float64(state.lenght) / float64(MAX_PAYLOAD_SIZE))
-	if numblocks < float64(DEFAULT_WINDOW_SIZE) {
+	if int(numblocks) < DEFAULT_WINDOW_SIZE {
 		state.windowsize = int(numblocks)
 	} else {
 		state.windowsize = DEFAULT_WINDOW_SIZE
