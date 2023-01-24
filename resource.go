@@ -1,11 +1,7 @@
-package coalago
+package newcoala
 
 import (
-	"crypto/md5"
-	"io"
-	"strconv"
 	"strings"
-	"time"
 )
 
 type CoAPResource struct {
@@ -13,7 +9,6 @@ type CoAPResource struct {
 	Path       string
 	Handler    CoAPResourceHandler
 	MediaTypes []MediaType
-	Hash       string // Unique Resource ID
 }
 
 type CoAPResourceHandler func(message *CoAPMessage) *CoAPResourceHandlerResult
@@ -29,21 +24,5 @@ func NewResponse(payload CoAPMessagePayload, code CoapCode) *CoAPResourceHandler
 }
 
 func NewCoAPResource(method CoapMethod, path string, handler CoAPResourceHandler) *CoAPResource {
-	path = strings.Trim(path, "/ ")
-
-	h := md5.New()
-	io.WriteString(h, strconv.FormatInt(time.Now().UnixNano(), 10))
-	hash := h.Sum(nil)
-
-	return &CoAPResource{Method: method, Path: path, Handler: handler, Hash: string(hash)}
-}
-
-func (resource *CoAPResource) DoesMatchPath(path string) bool {
-	path = strings.Trim(path, "/ ")
-	return (resource.Path == path)
-}
-
-func (resource *CoAPResource) DoesMatchPathAndMethod(path string, method CoapMethod) bool {
-	path = strings.Trim(path, "/ ")
-	return (resource.Path == path && resource.Method == method)
+	return &CoAPResource{Method: method, Path: strings.Trim(path, "/ "), Handler: handler}
 }

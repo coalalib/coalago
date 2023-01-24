@@ -1,4 +1,4 @@
-package coalago
+package newcoala
 
 import (
 	"encoding/binary"
@@ -7,6 +7,10 @@ import (
 	"net"
 	"sync/atomic"
 	"time"
+)
+
+const (
+	DEFAULT_WINDOW_SIZE = 70
 )
 
 // GenerateMessageId generate a uint16 Message ID
@@ -364,7 +368,7 @@ func newACKEmptyMessage(message *CoAPMessage, windowSize int) *CoAPMessage {
 	emptyAckMessage.Code = CoapCodeEmpty
 	emptyAckMessage.Recipient = message.Recipient
 	emptyAckMessage.Payload = NewEmptyPayload()
-	emptyAckMessage.AddOption(OptionSelectiveRepeatWindowSize, windowSize)
+	// emptyAckMessage.AddOption(OptionSelectiveRepeatWindowSize, windowSize)
 	emptyAckMessage.CloneOptions(message, OptionBlock1, OptionBlock2, OptionSelectiveRepeatWindowSize, OptionProxySecurityID)
 
 	return emptyAckMessage

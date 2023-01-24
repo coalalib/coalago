@@ -10,7 +10,6 @@ type SecuredSession struct {
 	Curve         Curve25519
 	AEAD          AEAD
 	PeerPublicKey []byte
-	UpdatedAt     int
 }
 
 func NewSecuredSession(privateKey []byte) (session SecuredSession, err error) {

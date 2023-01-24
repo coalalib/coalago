@@ -1,18 +1,16 @@
-package coalago
+package newcoala
 
 import "sync/atomic"
 
 var (
 	MetricReceivedMessages,
-	MetricBreakedMessages,
 	MetricSentMessages,
 	MetricRetransmitMessages,
 	MetricExpiredMessages,
 	MetricSentMessageErrors,
 	MetricSessionsRate,
 	MetricSessionsCount,
-	MetricSuccessfulHandhshakes,
-	MetricMaxMTU counterImpl
+	MetricSuccessfulHandhshakes counterImpl
 )
 
 type Counter interface {

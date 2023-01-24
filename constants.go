@@ -1,4 +1,4 @@
-package coalago
+package newcoala
 
 import (
 	"errors"
@@ -6,18 +6,11 @@ import (
 )
 
 var (
-	timeWait            = time.Second
-	maxSendAttempts     = 6
-	sumTimeAttempts     = timeWait*time.Duration(maxSendAttempts) + 100
-)
+	timeWait        = time.Second
+	maxSendAttempts = 6
+	sumTimeAttempts = timeWait*time.Duration(maxSendAttempts) + 100
 
-const (
-	SESSIONS_POOL_EXPIRATION = time.Second * 60 * 2
-	MAX_PAYLOAD_SIZE         = 1024
-	DEFAULT_WINDOW_SIZE 	 = 300
-	MIN_WiNDOW_SIZE 		 = 50
-	MAX_WINDOW_SIZE 	     = 1500
-	MTU             		 = 1500
+	MAX_PAYLOAD_SIZE = 1024
 )
 
 const PayloadMarker = 0xff
@@ -280,12 +273,4 @@ var (
 	ErrNilConn                       = errors.New("Connection object is nil")
 	ErrNilAddr                       = errors.New("Address cannot be nil")
 	ErrOptionLenghtOutOfRangePackets = errors.New("Option lenght out of range packet")
-	ErrUndefinedScheme               = errors.New("undefined scheme")
-	ErrMaxAttempts                   = errors.New("max attempts")
-	ErrorSessionNotFound             = errors.New("session not found")
-	ErrorClientSessionNotFound       = errors.New("client session not found")
-	ErrorSessionExpired              = errors.New("session expired")
-	ErrorClientSessionExpired        = errors.New("client session expired")
-	ErrorHandshake                   = errors.New("error handshake")
-	ERR_KEYS_NOT_MATCH               = "Expected and current public keys do not match"
 )
