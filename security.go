@@ -1,119 +1,195 @@
-package coalago
+package newcoala
 
 import (
 	"errors"
-	"fmt"
-	"math/rand"
 	"net"
 	"time"
 
-	"github.com/coalalib/coalago/session"
+	"github.com/ndmsystems/gum-server/services/DataService/newcoala/session"
+	"github.com/patrickmn/go-cache"
 )
 
-func securityOutputLayer(tr *transport, message *CoAPMessage, addr net.Addr) error {
+var (
+	ErrorSessionNotFound       error = errors.New("session not found")
+	ErrorClientSessionNotFound error = errors.New("client session not found")
+	ErrorSessionExpired        error = errors.New("session expired")
+	ErrorClientSessionExpired  error = errors.New("client session expired")
+	ErrorHandshake             error = errors.New("error handshake")
+)
+
+const (
+	sessionLifetime = time.Minute*4 + time.Second*9
+)
+
+type sessionState struct {
+	key string
+	est time.Time
+}
+
+type securitySessionStorage struct {
+	// rwmx sync.RWMutex
+	// m       map[string]session.SecuredSession
+	// indexes map[string]time.Time
+	// est     []sessionState
+	seccache *cache.Cache
+}
+
+func newSecuritySessionStorage() *securitySessionStorage {
+	s := &securitySessionStorage{
+		// m:       make(map[string]session.SecuredSession),
+		// indexes: make(map[string]time.Time),
+		seccache: cache.New(sessionLifetime, time.Second),
+	}
+
+	// go func() {
+	// 	for {
+	// 		s.cleanup()
+	// 		time.Sleep(time.Second)
+	// 	}
+	// }()
+
+	return s
+}
+
+// func (s *securitySessionStorage) cleanup() {
+// 	now := time.Now()
+// 	l := len(s.est)
+// 	for i := 0; i < l; i++ {
+// 		s.rwmx.RLock()
+// 		state := s.est[i]
+// 		s.rwmx.RUnlock()
+
+// 		if state.est.Sub(now) > 0 {
+// 			return
+// 		}
+
+// 		s.rwmx.Lock()
+// 		s.est = append(s.est[:i], s.est[i+1:]...)
+// 		i--
+
+// 		t := s.indexes[state.key]
+
+// 		if time.Since(t) >= sessionLifetime {
+// 			delete(s.m, state.key)
+// 			delete(s.indexes, state.key)
+// 		} else {
+// 			est := now.Add(sessionLifetime)
+// 			s.indexes[state.key] = now
+
+// 			s.est = append(s.est, sessionState{
+// 				est: est,
+// 				key: state.key,
+// 			})
+// 		}
+// 		s.rwmx.Unlock()
+
+// 	}
+// }
+
+func (s *securitySessionStorage) Set(k string, v session.SecuredSession) {
+	// now := time.Now()
+	// est := now.Add(sessionLifetime)
+	// s.rwmx.Lock()
+	// s.m[k] = v
+	// s.indexes[k] = now
+	// s.est = append(s.est, sessionState{
+	// 	est: est,
+	// 	key: k,
+	// })
+
+	// s.rwmx.Unlock()
+	s.seccache.SetDefault(k, v)
+}
+
+func (s *securitySessionStorage) Delete(k string) {
+	// s.rwmx.Lock()
+	// delete(s.m, k)
+	// delete(s.indexes, k)
+	// s.rwmx.Unlock()
+	s.seccache.Delete(k)
+}
+
+func (s *securitySessionStorage) Update(k string, sess session.SecuredSession) {
+	// s.rwmx.Lock()
+	// s.indexes[k] = time.Now()
+	// s.m[k] = sess
+	// s.rwmx.Unlock()
+	s.seccache.SetDefault(k, sess)
+}
+
+func (s *securitySessionStorage) Get(k string) (sess session.SecuredSession, ok bool) {
+	// s.rwmx.RLock()
+	// sess, ok := s.m[k]
+	// s.rwmx.RUnlock()
+
+	v, ok := s.seccache.Get(k)
+	if !ok {
+		return sess, ok
+	}
+
+	sess = v.(session.SecuredSession)
+	return sess, ok
+}
+
+func (s *Server) securityOutputLayer(pc net.PacketConn, message *CoAPMessage, addr net.Addr) error {
 	if message.GetScheme() != COAPS_SCHEME {
 		return nil
 	}
-
-	setProxyIDIfNeed(message, tr.conn.LocalAddr().String())
-
-	proxyAddr := message.ProxyAddr
-	if len(proxyAddr) > 0 {
-		proxyID, ok := getProxyIDIfNeed(proxyAddr, tr.conn.LocalAddr().String())
-		if ok {
-			proxyAddr = fmt.Sprintf("%v%v", proxyAddr, proxyID)
-		}
-	}
-
-	currentSession, ok := getSessionForAddress(tr, tr.conn.LocalAddr().String(), addr.String(), proxyAddr)
+	session, ok := s.secSessions.Get(addr.String())
 	if !ok {
 		return ErrorClientSessionNotFound
 	}
 
-	if err := encrypt(message, addr, currentSession.AEAD); err != nil {
+	if err := encrypt(message, addr, session.AEAD); err != nil {
 		return err
 	}
+
 	return nil
 }
 
-func setProxyIDIfNeed(message *CoAPMessage, senderAddr string) uint32 {
-	if message.GetOption(OptionProxyURI) != nil {
-		v, ok := proxyIDSessions.Get(message.ProxyAddr + senderAddr)
-		if !ok {
-			v = rand.Uint32()
-			proxyIDSessions.Set(message.ProxyAddr+senderAddr, v)
-		}
-		message.AddOption(OptionProxySecurityID, v)
-		return v.(uint32)
-	}
-	return 0
-}
-
-func getProxyIDIfNeed(proxyAddr string, senderAddr string) (uint32, bool) {
-	v, ok := proxyIDSessions.Get(proxyAddr + senderAddr)
-	if ok {
-		return v.(uint32), ok
-	}
-	return 0, ok
-}
-
-func getSessionForAddress(tr *transport, senderAddr, receiverAddr, proxyAddr string) (session.SecuredSession, bool) {
-	securedSession, ok := globalSessions.Get(senderAddr, receiverAddr, proxyAddr)
-	if ok {
-		globalSessions.Set(senderAddr, receiverAddr, proxyAddr, securedSession)
-	}
-	return securedSession, ok
-}
-
-func setSessionForAddress(privatekey []byte, securedSession session.SecuredSession, senderAddr, receiverAddr, proxyAddr string) {
-	globalSessions.Set(senderAddr, receiverAddr, proxyAddr, securedSession)
-	MetricSessionsRate.Inc()
-	MetricSessionsCount.Set(int64(globalSessions.ItemCount()))
-}
-
-func deleteSessionForAddress(senderAddr, receiverAddr, proxyAddr string) {
-	globalSessions.Delete(senderAddr, receiverAddr, proxyAddr)
-}
-
-func securityInputLayer(tr *transport, message *CoAPMessage, proxyAddr string) (isContinue bool, err error) {
-	if len(proxyAddr) > 0 {
-		proxyID, ok := getProxyIDIfNeed(proxyAddr, tr.conn.LocalAddr().String())
-		if ok {
-			proxyAddr = fmt.Sprintf("%v%v", proxyAddr, proxyID)
-		}
-	}
-
-	if ok, err := receiveHandshake(tr, tr.privateKey, message, proxyAddr); !ok {
-		return false, err
+func (s *Server) securityInputLayer(pc net.PacketConn, privateKey []byte, message *CoAPMessage) (isContinue bool, err error) {
+	option := message.GetOption(OptionHandshakeType)
+	if option != nil {
+		go s.receiveHandshake(pc, privateKey, option, message)
+		return false, nil
 	}
 
 	// Check if the message has coaps:// scheme and requires a new Session
 	if message.GetScheme() == COAPS_SCHEME {
-		var addressSession string
-
-		addressSession = message.Sender.String()
-
-		currentSession, ok := getSessionForAddress(tr, tr.conn.LocalAddr().String(), addressSession, proxyAddr)
-
+		currentSession, ok := s.secSessions.Get(message.Sender.String())
 		if !ok {
-			responseMessage := NewCoAPMessageId(ACK, CoapCodeUnauthorized, message.MessageID)
-			responseMessage.AddOption(OptionSessionNotFound, 1)
-			responseMessage.Token = message.Token
-			tr.SendTo(responseMessage, message.Sender)
+			go func() {
+				responseMessage := NewCoAPMessageId(ACK, CoapCodeUnauthorized, message.MessageID)
+				responseMessage.AddOption(OptionSessionNotFound, 1)
+				responseMessage.Token = message.Token
+				if b, err := Serialize(responseMessage); err == nil {
+					MetricSentMessages.Inc()
+					pc.WriteTo(b, message.Sender)
+				}
+			}()
 			return false, ErrorClientSessionNotFound
 		}
 
 		// Decrypt message payload
 		err := decrypt(message, currentSession.AEAD)
 		if err != nil {
-			deleteSessionForAddress(tr.conn.LocalAddr().String(), addressSession, proxyAddr)
+			s.secSessions.Delete(message.Sender.String())
+
 			responseMessage := NewCoAPMessageId(ACK, CoapCodeUnauthorized, message.MessageID)
 			responseMessage.AddOption(OptionSessionExpired, 1)
 			responseMessage.Token = message.Token
-			tr.SendTo(responseMessage, message.Sender)
+
+			if b, err := Serialize(responseMessage); err == nil {
+				MetricSentMessages.Inc()
+				pc.WriteTo(b, message.Sender)
+			}
+
 			return false, ErrorClientSessionExpired
 		}
 
+		s.secSessions.Update(message.Sender.String(), currentSession)
+
+		// s.secSessions.Set(message.Sender.String(), currentSession)
 		message.PeerPublicKey = currentSession.PeerPublicKey
 	}
 
@@ -122,11 +198,11 @@ func securityInputLayer(tr *transport, message *CoAPMessage, proxyAddr string) (
 	sessionExpired := message.GetOption(OptionSessionExpired)
 	if message.Code == CoapCodeUnauthorized {
 		if sessionNotFound != nil {
-			deleteSessionForAddress(tr.conn.LocalAddr().String(), message.Sender.String(), proxyAddr)
+			s.secSessions.Delete(message.Sender.String())
 			return false, ErrorSessionNotFound
 		}
 		if sessionExpired != nil {
-			deleteSessionForAddress(tr.conn.LocalAddr().String(), message.Sender.String(), proxyAddr)
+			s.secSessions.Delete(message.Sender.String())
 			return false, ErrorSessionExpired
 		}
 	}
@@ -134,124 +210,46 @@ func securityInputLayer(tr *transport, message *CoAPMessage, proxyAddr string) (
 	return true, nil
 }
 
-func receiveHandshake(tr *transport, privatekey []byte, message *CoAPMessage, proxyAddr string) (isContinue bool, err error) {
-	if message.IsProxies {
-		return true, nil
-	}
-	option := message.GetOption(OptionHandshakeType)
-	if option == nil {
-		return true, nil
-	}
-
+func (s *Server) receiveHandshake(pc net.PacketConn, privatekey []byte, option *CoAPMessageOption, message *CoAPMessage) (isContinue bool, err error) {
 	value := option.IntValue()
 	if value != CoapHandshakeTypeClientSignature && value != CoapHandshakeTypeClientHello {
 		return false, nil
 	}
+	peerSession, ok := s.secSessions.Get(message.Sender.String())
 
-	peerSession, ok := getSessionForAddress(tr, tr.conn.LocalAddr().String(), message.Sender.String(), proxyAddr)
 	if !ok {
-		if peerSession, err = session.NewSecuredSession(tr.privateKey); err != nil {
+		if peerSession, err = session.NewSecuredSession(privatekey); err != nil {
 			return false, ErrorHandshake
 		}
 	}
 	if value == CoapHandshakeTypeClientHello && message.Payload != nil {
 		peerSession.PeerPublicKey = message.Payload.Bytes()
 
-		if err := incomingHandshake(tr, peerSession.Curve.GetPublicKey(), message); err != nil {
+		if err := incomingHandshake(pc, peerSession.Curve.GetPublicKey(), message); err != nil {
 			return false, ErrorHandshake
 		}
+
 		if signature, err := peerSession.GetSignature(); err == nil {
 			if err = peerSession.PeerVerify(signature); err != nil {
 				return false, ErrorHandshake
 			}
 		}
 
-		MetricSuccessfulHandhshakes.Inc()
+		s.secSessions.Set(message.Sender.String(), peerSession)
+		MetricSessionsRate.Inc()
+		// MetricSessionsCount.Set(int64(len(s.secSessions.m)))
+		MetricSessionsCount.Set(int64(s.secSessions.seccache.ItemCount()))
 
-		peerSession.UpdatedAt = int(time.Now().Unix())
-		setSessionForAddress(privatekey, peerSession, tr.conn.LocalAddr().String(), message.Sender.String(), proxyAddr)
+		MetricSuccessfulHandhshakes.Inc()
 		return false, nil
 	}
 
 	return false, ErrorHandshake
 }
 
-func handshake(tr *transport, message *CoAPMessage, address net.Addr, proxyAddr string) (session.SecuredSession, error) {
-	ses, ok := getSessionForAddress(tr, tr.conn.LocalAddr().String(), address.String(), proxyAddr)
-	if ok {
-		return ses, nil
-
-	}
-
-	ses, err := session.NewSecuredSession(tr.privateKey)
-	if err != nil {
-		return session.SecuredSession{}, err
-	}
-
-	// Sending my Public Key.
-	// Receiving Peer's Public Key as a Response!
-	peerPublicKey, err := sendHelloFromClient(tr, message, ses.Curve.GetPublicKey(), address)
-	if err != nil {
-		return session.SecuredSession{}, err
-	}
-
-	// assign new value
-	ses.PeerPublicKey = peerPublicKey
-
-	signature, err := ses.GetSignature()
-	if err != nil {
-		return session.SecuredSession{}, err
-	}
-
-	err = ses.Verify(signature)
-	if err != nil {
-		return session.SecuredSession{}, err
-	}
-
-	globalSessions.Set(tr.conn.LocalAddr().String(), address.String(), proxyAddr, ses)
-	MetricSuccessfulHandhshakes.Inc()
-
-	return ses, nil
-}
-
-func sendHelloFromClient(tr *transport, origMessage *CoAPMessage, myPublicKey []byte, address net.Addr) ([]byte, error) {
-	var peerPublicKey []byte
-	message := newClientHelloMessage(origMessage, myPublicKey)
-
-	respMsg, err := tr.Send(message)
-	if err != nil {
-		return nil, err
-	}
-
-	if respMsg == nil {
-		return nil, nil
-	}
-
-	optHandshake := respMsg.GetOption(OptionHandshakeType)
-	if optHandshake != nil {
-		if optHandshake.IntValue() == CoapHandshakeTypePeerHello {
-			peerPublicKey = respMsg.Payload.Bytes()
-		}
-	}
-
-	if origMessage.BreakConnectionOnPK != nil {
-		if origMessage.BreakConnectionOnPK(peerPublicKey) {
-			return nil, errors.New(ERR_KEYS_NOT_MATCH)
-		}
-	}
-
-	return peerPublicKey, err
-}
-
-func newClientHelloMessage(origMessage *CoAPMessage, myPublicKey []byte) *CoAPMessage {
-	message := NewCoAPMessage(CON, POST)
-	message.AddOption(OptionHandshakeType, CoapHandshakeTypeClientHello)
-	message.Payload = NewBytesPayload(myPublicKey)
-	message.Token = generateToken(6)
-	message.CloneOptions(origMessage, OptionProxyURI, OptionProxySecurityID)
-	message.ProxyAddr = origMessage.ProxyAddr
-	return message
-}
+const (
+	ERR_KEYS_NOT_MATCH = "Expected and current public keys do not match"
+)
 
 func newServerHelloMessage(origMessage *CoAPMessage, publicKey []byte) *CoAPMessage {
 	message := NewCoAPMessageId(ACK, CoapCodeContent, origMessage.MessageID)
@@ -263,11 +261,12 @@ func newServerHelloMessage(origMessage *CoAPMessage, publicKey []byte) *CoAPMess
 	return message
 }
 
-func incomingHandshake(tr *transport, publicKey []byte, origMessage *CoAPMessage) error {
+func incomingHandshake(pc net.PacketConn, publicKey []byte, origMessage *CoAPMessage) error {
 	message := newServerHelloMessage(origMessage, publicKey)
-	if _, err := tr.SendTo(message, origMessage.Sender); err != nil {
+	b, err := Serialize(message)
+	if err != nil {
 		return err
 	}
-
-	return nil
+	_, err = pc.WriteTo(b, origMessage.Sender)
+	return err
 }

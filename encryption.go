@@ -1,10 +1,10 @@
-package coalago
+package newcoala
 
 import (
 	"net"
 	"net/url"
 
-	"github.com/coalalib/coalago/session"
+	"github.com/ndmsystems/gum-server/services/DataService/newcoala/session"
 )
 
 func encrypt(message *CoAPMessage, address net.Addr, aead session.AEAD) error {
