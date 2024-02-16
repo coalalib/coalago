@@ -164,6 +164,8 @@ func receiveHandshake(tr *transport, privatekey []byte, message *CoAPMessage, pr
 			if err = peerSession.PeerVerify(signature); err != nil {
 				return false, ErrorHandshake
 			}
+		} else {
+			return false, ErrorHandshake
 		}
 
 		MetricSuccessfulHandhshakes.Inc()
