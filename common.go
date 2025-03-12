@@ -155,21 +155,6 @@ func encodeInt(v uint32) []byte {
 	}
 }
 
-// Gets the string representation of a CoAP Method code (e.g. GET, PUT, DELETE etc)
-func methodString(c CoapMethod) string {
-	switch c {
-	case CoapMethodGet:
-		return "GET"
-	case CoapMethodDelete:
-		return "DEL"
-	case CoapMethodPost:
-		return "POST"
-	case CoapMethodPut:
-		return "PUT"
-	}
-	return ""
-}
-
 func typeString(c CoapType) string {
 	switch c {
 	case CON:
