@@ -28,10 +28,6 @@ func NewServerWithPrivateKey(privatekey []byte) *Server {
 	return &Server{privatekey: privatekey}
 }
 
-type Resourcer interface {
-	getResourceForPathAndMethod(path string, method CoapMethod) *CoAPResource
-}
-
 func (s *Server) Listen(addr string) error {
 	s.addr = addr // сохраняем адрес для будущего рестарта
 	conn, err := newListener(addr)
@@ -46,6 +42,88 @@ func (s *Server) Listen(addr string) error {
 		addr, DEFAULT_WINDOW_SIZE, MIN_WiNDOW_SIZE, MAX_WINDOW_SIZE, maxSendAttempts, timeWait, SESSIONS_POOL_EXPIRATION)
 
 	s.listenLoop() // блокирующий цикл прослушивания
+	return nil
+}
+
+func (s *Server) Refresh() error {
+	if s.addr == "" {
+		return fmt.Errorf("server address not set")
+	}
+	// Закрываем старое соединение, если возможно
+	if s.sr != nil && s.sr.conn != nil {
+		if closer, ok := s.sr.conn.(interface{ Close() error }); ok {
+			closer.Close()
+		}
+	}
+	conn, err := newListener(s.addr)
+	if err != nil {
+		return err
+	}
+	s.sr = newtransport(conn)
+	s.sr.privateKey = s.privatekey
+
+	go s.listenLoop() // перезапускаем цикл прослушивания в горутине
+	fmt.Printf("server refreshed on ADDR: %s", s.addr)
+	return nil
+}
+
+func (s *Server) GET(path string, handler CoAPResourceHandler) {
+	s.addResource(NewCoAPResource(CoapMethodGet, path, handler))
+}
+
+func (s *Server) POST(path string, handler CoAPResourceHandler) {
+	s.addResource(NewCoAPResource(CoapMethodPost, path, handler))
+}
+
+func (s *Server) PUT(path string, handler CoAPResourceHandler) {
+	s.addResource(NewCoAPResource(CoapMethodPut, path, handler))
+}
+
+func (s *Server) DELETE(path string, handler CoAPResourceHandler) {
+	s.addResource(NewCoAPResource(CoapMethodDelete, path, handler))
+}
+
+func (s *Server) Proxy(flag bool) {
+	s.proxyEnable = flag
+}
+
+func (s *Server) SetPrivateKey(privateKey []byte) {
+	s.privatekey = privateKey
+}
+
+func (s *Server) GetPrivateKey() []byte {
+	return s.privatekey
+}
+
+// Send отправляет сообщение на указанный адрес и возвращает ответ
+// используется вместо клиента, когда нужно отправить запрос с занятого сервером порта
+func (s *Server) Send(message *CoAPMessage, addr string) (*CoAPMessage, error) {
+	b, err := Serialize(message)
+	if err != nil {
+		return nil, err
+	}
+	_, err = s.sr.conn.WriteTo(b, addr)
+	if err != nil {
+		return nil, err
+	}
+
+	return s.bq.Read(message.MessageID)
+}
+
+func (s *Server) addResource(res *CoAPResource) {
+	key := res.Path + fmt.Sprint(res.Method)
+	s.resources.Store(key, res)
+}
+
+func (s *Server) getResourceForPathAndMethod(path string, method CoapMethod) *CoAPResource {
+	path = strings.Trim(path, "/ ")
+	if res, ok := s.resources.Load("*" + fmt.Sprint(method)); ok {
+		return res.(*CoAPResource)
+	}
+	key := path + fmt.Sprint(method)
+	if res, ok := s.resources.Load(key); ok {
+		return res.(*CoAPResource)
+	}
 	return nil
 }
 
@@ -84,109 +162,4 @@ func (s *Server) listenLoop() {
 		}))
 		go fn.(LocalStateFn)(message)
 	}
-}
-
-func (s *Server) Refresh() error {
-	if s.addr == "" {
-		return fmt.Errorf("server address not set")
-	}
-	// Закрываем старое соединение, если возможно
-	if s.sr != nil && s.sr.conn != nil {
-		if closer, ok := s.sr.conn.(interface{ Close() error }); ok {
-			closer.Close()
-		}
-	}
-	conn, err := newListener(s.addr)
-	if err != nil {
-		return err
-	}
-	s.sr = newtransport(conn)
-	s.sr.privateKey = s.privatekey
-
-	go s.listenLoop() // перезапускаем цикл прослушивания в горутине
-	fmt.Printf("server refreshed on ADDR: %s", s.addr)
-	return nil
-}
-
-/*
-func (s *Server) Serve(conn *net.UDPConn) {
-	c := &connection{conn: conn}
-	s.sr = newtransport(c)
-	s.sr.privateKey = s.privatekey
-}
-*/
-
-func (s *Server) ServeMessage(message *CoAPMessage) {
-	id := message.Sender.String() + message.GetTokenString()
-	fn, _ := StorageLocalStates.LoadOrStore(id, MakeLocalStateFn(s, s.sr, nil, func() {
-		StorageLocalStates.Delete(id)
-	}))
-	go fn.(LocalStateFn)(message)
-}
-
-func (s *Server) addResource(res *CoAPResource) {
-	key := res.Path + fmt.Sprint(res.Method)
-	s.resources.Store(key, res)
-}
-
-func (s *Server) GET(path string, handler CoAPResourceHandler) {
-	s.addResource(NewCoAPResource(CoapMethodGet, path, handler))
-}
-
-func (s *Server) POST(path string, handler CoAPResourceHandler) {
-	s.addResource(NewCoAPResource(CoapMethodPost, path, handler))
-}
-
-func (s *Server) AddPUTResource(path string, handler CoAPResourceHandler) {
-	s.addResource(NewCoAPResource(CoapMethodPut, path, handler))
-}
-
-func (s *Server) DELETE(path string, handler CoAPResourceHandler) {
-	s.addResource(NewCoAPResource(CoapMethodDelete, path, handler))
-}
-
-func (s *Server) getResourceForPathAndMethod(path string, method CoapMethod) *CoAPResource {
-	path = strings.Trim(path, "/ ")
-	if res, ok := s.resources.Load("*" + fmt.Sprint(method)); ok {
-		return res.(*CoAPResource)
-	}
-	key := path + fmt.Sprint(method)
-	if res, ok := s.resources.Load(key); ok {
-		return res.(*CoAPResource)
-	}
-	return nil
-}
-
-func (s *Server) EnableProxy() {
-	s.proxyEnable = true
-}
-
-func (s *Server) DisableProxy() {
-	s.proxyEnable = false
-}
-
-func (s *Server) SetPrivateKey(privateKey []byte) {
-	s.privatekey = privateKey
-}
-
-func (s *Server) GetPrivateKey() []byte {
-	return s.privatekey
-}
-
-func (s *Server) SendToSocket(message *CoAPMessage, addr string) error {
-	b, err := Serialize(message)
-	if err != nil {
-		return err
-	}
-	_, err = s.sr.conn.WriteTo(b, addr)
-	return err
-}
-
-func (s *Server) Send(message *CoAPMessage, addr string) (*CoAPMessage, error) {
-	err := s.SendToSocket(message, addr)
-	if err != nil {
-		return nil, err
-	}
-
-	return s.bq.Read(message.MessageID)
 }

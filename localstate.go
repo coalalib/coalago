@@ -11,6 +11,10 @@ var StorageLocalStates sync.Map // Используем sync.Map с LoadOrStore
 
 type LocalStateFn func(*CoAPMessage)
 
+type Resourcer interface {
+	getResourceForPathAndMethod(path string, method CoapMethod) *CoAPResource
+}
+
 type localState struct {
 	mx              sync.Mutex
 	bufBlock1       map[int][]byte
