@@ -12,6 +12,7 @@ type sessionStorage interface {
 	Get(sender string, receiver string, proxy string) (session.SecuredSession, bool)
 	Delete(sender string, receiver string, proxy string)
 	ItemCount() int
+	LoadOrStore(sender string, receiver string, proxy string, sess session.SecuredSession) (session.SecuredSession, bool)
 }
 
 type sessionStorageImpl struct {
@@ -21,7 +22,6 @@ type sessionStorageImpl struct {
 func newSessionStorageImpl() *sessionStorageImpl {
 	s := new(sessionStorageImpl)
 	s.storage = cache.New(SESSIONS_POOL_EXPIRATION, time.Second*1)
-
 	return s
 }
 
@@ -54,6 +54,18 @@ func (s *sessionStorageImpl) ItemCount() int {
 	return s.storage.ItemCount()
 }
 
+func (s *sessionStorageImpl) LoadOrStore(sender string, receiver string, proxy string, sess session.SecuredSession) (session.SecuredSession, bool) {
+	if len(proxy) != 0 {
+		sender = ""
+	}
+	key := sender + receiver + proxy
+	if v, ok := s.storage.Get(key); ok {
+		return v.(session.SecuredSession), true
+	}
+	s.storage.SetDefault(key, sess)
+	return sess, false
+}
+
 type proxySessionStorage struct {
 	storage *cache.Cache
 }
@@ -61,7 +73,6 @@ type proxySessionStorage struct {
 func newProxySessionStorage() *proxySessionStorage {
 	s := new(proxySessionStorage)
 	s.storage = cache.New(time.Minute, time.Second*1)
-
 	return s
 }
 
@@ -70,7 +81,6 @@ func (s *proxySessionStorage) Set(key string, value interface{}) {
 }
 
 func (s *proxySessionStorage) Get(key string) (interface{}, bool) {
-
 	v, ok := s.storage.Get(key)
 	if ok {
 		return v, true

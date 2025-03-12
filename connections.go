@@ -7,7 +7,6 @@ import (
 )
 
 var NumberConnections = 1024
-
 var globalPoolConnections = newConnpool()
 
 type dialer interface {
@@ -40,7 +39,10 @@ func (c *connection) SetUDPRecvBuf(size int) int {
 
 func (c *connection) Close() error {
 	err := c.conn.Close()
-	<-c.end
+	// Если канал задан, то освобождаем ресурс
+	if c.end != nil {
+		<-c.end
+	}
 	return err
 }
 
@@ -77,16 +79,13 @@ func newDialer(end chan struct{}, addr string) (dialer, error) {
 	if err != nil {
 		return nil, err
 	}
-	end <- struct{}{}
 	conn, err := net.DialUDP("udp4", nil, a)
 	if err != nil {
 		return nil, err
 	}
-
-	c := new(connection)
-	c.conn = conn
-	c.end = end
-	return c, nil
+	// Токен резервируется только после успешного соединения
+	end <- struct{}{}
+	return &connection{conn: conn, end: end}, nil
 }
 
 func newListener(addr string) (dialer, error) {
@@ -98,9 +97,8 @@ func newListener(addr string) (dialer, error) {
 	if err != nil {
 		return nil, err
 	}
-	c := new(connection)
-	c.conn = conn
-	return c, nil
+	// Для listener создаём свой end, чтобы Close не блокировался
+	return &connection{conn: conn, end: make(chan struct{}, 1)}, nil
 }
 
 type connpool struct {
@@ -108,9 +106,9 @@ type connpool struct {
 }
 
 func newConnpool() *connpool {
-	c := new(connpool)
-	c.balance = make(chan struct{}, NumberConnections)
-	return c
+	return &connpool{
+		balance: make(chan struct{}, NumberConnections),
+	}
 }
 
 func (c *connpool) Dial(addr string) (dialer, error) {
@@ -154,12 +152,9 @@ func receiveMessage(tr *transport, origMessage *CoAPMessage) (*CoAPMessage, erro
 		if err != nil {
 			return nil, err
 		}
-
 		if !bytes.Equal(message.Token, origMessage.Token) {
 			continue
 		}
-
 		return message, nil
 	}
-
 }
