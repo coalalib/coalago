@@ -2,6 +2,7 @@ package coalago
 
 import (
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 )
@@ -108,6 +109,24 @@ func (s *Server) Send(message *CoAPMessage, addr string) (*CoAPMessage, error) {
 	}
 
 	return s.bq.Read(message.MessageID)
+}
+
+// Serve запускает сервер на указанном соединении (например, если нужно использовать свой UDP-сервер)
+// нужно для прокси сервиса
+func (s *Server) Serve(conn *net.UDPConn) {
+	c := &connection{conn: conn}
+	s.sr = newtransport(c)
+	s.sr.privateKey = s.privatekey
+}
+
+// ServeMessage обрабатывает сообщение, как если бы оно пришло от клиента
+// нужно для прокси сервиса
+func (s *Server) ServeMessage(message *CoAPMessage) {
+	id := message.Sender.String() + message.GetTokenString()
+	fn, _ := StorageLocalStates.LoadOrStore(id, MakeLocalStateFn(s, s.sr, nil, func() {
+		StorageLocalStates.Delete(id)
+	}))
+	go fn.(LocalStateFn)(message)
 }
 
 func (s *Server) addResource(res *CoAPResource) {
