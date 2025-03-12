@@ -25,6 +25,34 @@ func NewClientWithPrivateKey(pk []byte) *Client {
 	return &Client{privateKey: pk}
 }
 
+func (c *Client) Send(message *CoAPMessage, addr string, options ...*CoAPMessageOption) (*Response, error) {
+	message.AddOptions(options)
+
+	conn, err := globalPoolConnections.Dial(addr)
+	if err != nil {
+		return nil, err
+	}
+
+	defer conn.Close()
+
+	sr := newtransport(conn)
+	sr.privateKey = c.privateKey
+
+	resp, err := sr.Send(message)
+	if err != nil {
+		return nil, err
+	}
+	switch message.Type {
+	case NON, ACK:
+		return nil, nil
+	}
+	r := new(Response)
+	r.Body = resp.Payload.Bytes()
+	r.Code = resp.Code
+	r.PeerPublicKey = resp.PeerPublicKey
+	return r, nil
+}
+
 func (c *Client) GET(uri string, opts ...*CoAPMessageOption) (*Response, error) {
 	msg, err := constructMessage(GET, uri)
 	if err != nil {
