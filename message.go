@@ -646,3 +646,7 @@ func (p *JSONPayload) Length() int {
 func (p *JSONPayload) String() string {
 	return string(p.Bytes())
 }
+
+func isBigPayload(msg *CoAPMessage) bool {
+	return msg.Payload != nil && msg.Payload.Length() > MAX_PAYLOAD_SIZE
+}
