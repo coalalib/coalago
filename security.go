@@ -89,9 +89,8 @@ func securityInputLayer(tr *transport, message *CoAPMessage, proxyAddr string) (
 
 	// Check if the message has coaps:// scheme and requires a new Session
 	if message.GetScheme() == COAPS_SCHEME {
-		var addressSession string
 
-		addressSession = message.Sender.String()
+		addressSession := message.Sender.String()
 
 		currentSession, ok := getSessionForAddress(tr, tr.conn.LocalAddr().String(), addressSession, proxyAddr)
 

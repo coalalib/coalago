@@ -1,7 +1,7 @@
 package coalago
 
 func requestOnReceive(resource *CoAPResource, sr *transport, message *CoAPMessage) bool {
-	if message.Code < 0 || message.Code > 4 {
+	if message.Code > 4 {
 		return true
 	}
 
@@ -49,7 +49,7 @@ func returnPing(sr *transport, message *CoAPMessage) bool {
 func methodNotAllowed(sr *transport, message *CoAPMessage) bool {
 	responseMessage := NewCoAPMessageId(ACK, CoapCodeMethodNotAllowed, message.MessageID)
 	responseMessage.Payload = NewStringPayload("Method is not allowed for requested resource")
-	if message.Token != nil && len(message.Token) > 0 {
+	if len(message.Token) > 0 {
 		responseMessage.Token = message.Token
 	}
 	responseMessage.CloneOptions(message, OptionBlock1, OptionBlock2, OptionProxySecurityID)
@@ -90,7 +90,7 @@ func returnResultFromResource(sr *transport, message *CoAPMessage, handlerResult
 func noResource(sr *transport, message *CoAPMessage) bool {
 	responseMessage := NewCoAPMessageId(ACK, CoapCodeNotFound, message.MessageID)
 	responseMessage.Payload = NewStringPayload("Requested resource " + message.GetURIPath() + " does not exist")
-	if message.Token != nil && len(message.Token) > 0 {
+	if len(message.Token) > 0 {
 		responseMessage.Token = message.Token
 	}
 	responseMessage.CloneOptions(message, OptionBlock1, OptionBlock2, OptionProxySecurityID)

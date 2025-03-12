@@ -275,26 +275,15 @@ func ackTo(initMessage *CoAPMessage, origMessage *CoAPMessage, code CoapCode) *C
 }
 
 func ackToWithWindowOffset(initMessage *CoAPMessage, origMessage *CoAPMessage, code CoapCode, windowSize int, blockNumber int, buf map[int][]byte) *CoAPMessage {
-	// var offset = 0
-	// for i := blockNumber; i > blockNumber-windowSize; i-- {
-	// 	offset++
-	// }
-
 	result := NewCoAPMessage(ACK, code)
 	result.MessageID = origMessage.MessageID
 	result.Token = origMessage.Token
 	result.CloneOptions(origMessage, OptionURIScheme, OptionSelectiveRepeatWindowSize, OptionBlock1, OptionBlock2, OptionProxySecurityID)
 	result.Recipient = origMessage.Sender
-
-	// if offset > 0 {
-	// 	result.AddOption(OptionWindowtOffset, uint16(offset))
-	// }
-
 	if initMessage != nil {
 		result.ProxyAddr = initMessage.ProxyAddr
 		result.CloneOptions(initMessage, OptionProxyURI)
 	}
-
 	return result
 }
 

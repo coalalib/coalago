@@ -12,18 +12,12 @@ type CoAPMessageOption struct {
 
 // Determines if an option is elective
 func (o *CoAPMessageOption) IsElective() bool {
-	if (int(o.Code) % 2) != 0 {
-		return false
-	}
-	return true
+	return (int(o.Code) % 2) == 0
 }
 
 // Determines if an option is critical
 func (o *CoAPMessageOption) IsCritical() bool {
-	if (int(o.Code) % 2) != 0 {
-		return true
-	}
-	return false
+	return (int(o.Code) % 2) != 0
 }
 
 // Returns the string value of an option
