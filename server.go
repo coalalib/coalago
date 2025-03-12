@@ -2,15 +2,9 @@ package coalago
 
 import (
 	"fmt"
-	"net"
 	"strings"
 	"sync"
 )
-
-type rawData struct {
-	buff   []byte
-	sender net.Addr
-}
 
 type Server struct {
 	proxyEnable bool
@@ -47,9 +41,9 @@ func (s *Server) Listen(addr string) error {
 
 	s.sr = newtransport(conn)
 	s.sr.privateKey = s.privatekey
-	fmt.Println(fmt.Sprintf(
-		"COALAServer start ADDR: %s, WS: %d, MinWS: %d, MaxWS: %d, Retransmit:%d, timeWait:%d, poolExpiration:%d",
-		addr, DEFAULT_WINDOW_SIZE, MIN_WiNDOW_SIZE, MAX_WINDOW_SIZE, maxSendAttempts, timeWait, SESSIONS_POOL_EXPIRATION))
+	fmt.Printf(
+		"COALA server start ADDR: %s, WS: %d, MinWS: %d, MaxWS: %d, Retransmit:%d, timeWait:%d, poolExpiration:%d",
+		addr, DEFAULT_WINDOW_SIZE, MIN_WiNDOW_SIZE, MAX_WINDOW_SIZE, maxSendAttempts, timeWait, SESSIONS_POOL_EXPIRATION)
 
 	s.listenLoop() // блокирующий цикл прослушивания
 	return nil
@@ -61,10 +55,10 @@ func (s *Server) listenLoop() {
 		n, senderAddr, err := s.sr.conn.Listen(readBuf)
 		if err != nil {
 			if strings.Contains(err.Error(), "use of closed network connection") {
-				fmt.Println("Соединение закрыто, завершаем цикл прослушивания")
+				fmt.Println("coonection was closed")
 				return
 			}
-			fmt.Println(fmt.Sprintf("Ошибка чтения: %v", err))
+			fmt.Printf("read error: %v", err)
 			continue
 		}
 		if n == 0 || n > MTU {
@@ -110,15 +104,17 @@ func (s *Server) Refresh() error {
 	s.sr.privateKey = s.privatekey
 
 	go s.listenLoop() // перезапускаем цикл прослушивания в горутине
-	fmt.Println(fmt.Sprintf("COALAServer refreshed on ADDR: %s", s.addr))
+	fmt.Printf("server refreshed on ADDR: %s", s.addr)
 	return nil
 }
 
+/*
 func (s *Server) Serve(conn *net.UDPConn) {
 	c := &connection{conn: conn}
 	s.sr = newtransport(c)
 	s.sr.privateKey = s.privatekey
 }
+*/
 
 func (s *Server) ServeMessage(message *CoAPMessage) {
 	id := message.Sender.String() + message.GetTokenString()

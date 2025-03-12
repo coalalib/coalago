@@ -6,18 +6,17 @@ import (
 )
 
 var (
-	timeWait            = time.Second
-	maxSendAttempts     = 6
-	sumTimeAttempts     = timeWait*time.Duration(maxSendAttempts) + 100
+	timeWait        = time.Second
+	maxSendAttempts = 6
 )
 
 const (
 	SESSIONS_POOL_EXPIRATION = time.Second * 60 * 2
 	MAX_PAYLOAD_SIZE         = 1024
-	DEFAULT_WINDOW_SIZE 	 = 300
-	MIN_WiNDOW_SIZE 		 = 50
-	MAX_WINDOW_SIZE 	     = 1500
-	MTU             		 = 1500
+	DEFAULT_WINDOW_SIZE      = 300
+	MIN_WiNDOW_SIZE          = 50
+	MAX_WINDOW_SIZE          = 1500
+	MTU                      = 1500
 )
 
 const PayloadMarker = 0xff
@@ -264,22 +263,22 @@ const (
 )
 
 var (
-	ErrPacketLengthLessThan4         = errors.New("Packet length less than 4 bytes")
-	ErrInvalidCoapVersion            = errors.New("Invalid CoAP version. Should be 1.")
-	ErrOptionLengthUsesValue15       = errors.New(("Message format error. Option length has reserved value of 15"))
-	ErrOptionDeltaUsesValue15        = errors.New(("Message format error. Option delta has reserved value of 15"))
-	ErrUnknownMessageType            = errors.New("Unknown message type")
-	ErrInvalidTokenLength            = errors.New("Invalid Token Length ( > 8)")
-	ErrUnknownCriticalOption         = errors.New("Unknown critical option encountered")
-	ErrUnsupportedMethod             = errors.New("Unsupported Method")
-	ErrNoMatchingRoute               = errors.New("No matching route found")
-	ErrUnsupportedContentFormat      = errors.New("Unsupported Content-Format")
-	ErrNoMatchingMethod              = errors.New("No matching method")
-	ErrNilMessage                    = errors.New("Message is nil")
-	ErrRepeatedMessage               = errors.New("Repeated message")
-	ErrNilConn                       = errors.New("Connection object is nil")
-	ErrNilAddr                       = errors.New("Address cannot be nil")
-	ErrOptionLenghtOutOfRangePackets = errors.New("Option lenght out of range packet")
+	ErrPacketLengthLessThan4         = errors.New("packet length less than 4 bytes")
+	ErrInvalidCoapVersion            = errors.New("invalid CoAP version. should be 1")
+	ErrOptionLengthUsesValue15       = errors.New("message format error. option length has reserved value of 15")
+	ErrOptionDeltaUsesValue15        = errors.New("message format error. option delta has reserved value of 15")
+	ErrUnknownMessageType            = errors.New("unknown message type")
+	ErrInvalidTokenLength            = errors.New("invalid token length ( > 8)")
+	ErrUnknownCriticalOption         = errors.New("unknown critical option encountered")
+	ErrUnsupportedMethod             = errors.New("unsupported method")
+	ErrNoMatchingRoute               = errors.New("no matching route found")
+	ErrUnsupportedContentFormat      = errors.New("unsupported content-format")
+	ErrNoMatchingMethod              = errors.New("no matching method")
+	ErrNilMessage                    = errors.New("message is nil")
+	ErrRepeatedMessage               = errors.New("repeated message")
+	ErrNilConn                       = errors.New("connection object is nil")
+	ErrNilAddr                       = errors.New("address cannot be nil")
+	ErrOptionLenghtOutOfRangePackets = errors.New("option length out of range packet")
 	ErrUndefinedScheme               = errors.New("undefined scheme")
 	ErrMaxAttempts                   = errors.New("max attempts")
 	ErrorSessionNotFound             = errors.New("session not found")
@@ -287,5 +286,5 @@ var (
 	ErrorSessionExpired              = errors.New("session expired")
 	ErrorClientSessionExpired        = errors.New("client session expired")
 	ErrorHandshake                   = errors.New("error handshake")
-	ERR_KEYS_NOT_MATCH               = "Expected and current public keys do not match"
+	ERR_KEYS_NOT_MATCH               = "expected and current public keys do not match"
 )

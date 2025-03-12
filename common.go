@@ -69,7 +69,7 @@ func getOptionHeaderValue(optValue int) (int, error) {
 	case optValue <= 65804:
 		return 14, nil
 	}
-	return 0, errors.New("Invalid Option Delta")
+	return 0, errors.New("invalid Option Delta")
 }
 
 // Validates a message object and returns any error upon validation failure

@@ -128,7 +128,6 @@ type packet struct {
 	attempts int
 	lastSend time.Time
 	message  *CoAPMessage
-	response *CoAPMessage
 }
 
 func receiveMessage(tr *transport, origMessage *CoAPMessage) (*CoAPMessage, error) {
