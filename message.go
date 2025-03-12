@@ -15,28 +15,29 @@ import (
 )
 
 // A Message object represents a CoAP payload
+// CoAPMessage represents a CoAP (Constrained Application Protocol) message.
 type CoAPMessage struct {
-	MessageID uint16
-	Type      CoapType
-	Code      CoapCode
-	Payload   CoAPMessagePayload
-	Token     []byte
-	Options   []*CoAPMessageOption
+	MessageID uint16               // MessageID is the unique identifier for the message.
+	Type      CoapType             // Type indicates the type of the CoAP message (e.g., Confirmable, Non-confirmable).
+	Code      CoapCode             // Code represents the request method or response code.
+	Payload   CoAPMessagePayload   // Payload contains the data being transmitted.
+	Token     []byte               // Token is used to match responses with requests.
+	Options   []*CoAPMessageOption // Options are the optional parameters for the message.
 
-	Sender    net.Addr
-	Recipient net.Addr
+	Sender    net.Addr // Sender is the address of the message sender.
+	Recipient net.Addr // Recipient is the address of the message recipient.
 
-	Attempts int
-	LastSent time.Time
-	Timeout  time.Duration
+	Attempts int           // Attempts is the number of times the message has been sent.
+	LastSent time.Time     // LastSent is the timestamp of the last send attempt.
+	Timeout  time.Duration // Timeout is the duration to wait for a response before timing out.
 
-	IsProxies bool
+	IsProxies bool // IsProxies indicates if the message is being proxied.
 
-	BreakConnectionOnPK func(actualPK []byte) bool
-	PeerPublicKey       []byte
+	BreakConnectionOnPK func(actualPK []byte) bool // BreakConnectionOnPK is a function to break the connection based on the peer's public key.
+	PeerPublicKey       []byte                     // PeerPublicKey is the public key of the peer.
 
-	ProxyAddr string
-	Context   context.Context
+	ProxyAddr string          // ProxyAddr is the address of the proxy server.
+	Context   context.Context // Context carries deadlines, cancellation signals, and other request-scoped values.
 }
 
 func NewCoAPMessage(messageType CoapType, messageCode CoapCode) *CoAPMessage {
