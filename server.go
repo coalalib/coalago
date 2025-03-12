@@ -19,11 +19,17 @@ type Server struct {
 	sr          *transport
 	resources   sync.Map
 	privatekey  []byte
-	addr        string // сохраняем адрес для Refresh()
+	bq          backwardStorage
+  addr        string // сохраняем адрес для Refresh()
+
 }
 
 func NewServer() *Server {
-	return &Server{}
+	return &Server{
+		bq: backwardStorage{
+			m: make(map[uint16]chan *CoAPMessage),
+		},
+	}
 }
 
 func NewServerWithPrivateKey(privatekey []byte) *Server {
@@ -68,6 +74,11 @@ func (s *Server) listenLoop() {
 		message, err := preparationReceivingBufferForStorageLocalStates(readBuf[:n], senderAddr)
 		if err != nil {
 			continue
+		}
+
+		if s.bq.Has(message.MessageID) {
+			s.bq.Write(message)
+			goto start
 		}
 
 		id := senderAddr.String() + message.GetTokenString()
@@ -170,4 +181,13 @@ func (s *Server) SendToSocket(message *CoAPMessage, addr string) error {
 	}
 	_, err = s.sr.conn.WriteTo(b, addr)
 	return err
+}
+
+func (s *Server) Send(message *CoAPMessage, addr string) (*CoAPMessage, error) {
+	err := s.SendToSocket(message, addr)
+	if err != nil {
+		return nil, err
+	}
+
+	return s.bq.Read(message.MessageID)
 }
