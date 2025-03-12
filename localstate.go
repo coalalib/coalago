@@ -7,54 +7,73 @@ import (
 	"time"
 
 	log "github.com/ndmsystems/golog"
-	"github.com/patrickmn/go-cache"
 )
 
-var StorageLocalStates = cache.New(sumTimeAttempts, time.Second)
+var StorageLocalStates sync.Map // Используем sync.Map с LoadOrStore
 
 type LocalStateFn func(*CoAPMessage)
 
-func MakeLocalStateFn(r Resourcer, tr *transport, respHandler func(*CoAPMessage, error), closeCallback func()) LocalStateFn {
-	var mx sync.Mutex
-	var bufBlock1 = make(map[int][]byte)
-	var totalBlocks1 = -1
-	var runnedHandler int32 = 0
-	var downloadStartTime = time.Now()
+type localState struct {
+	mx              sync.Mutex
+	bufBlock1       map[int][]byte
+	totalBlocks     int
+	runnedHandler   int32
+	downloadStarted time.Time
+	r               Resourcer
+	tr              *transport
+	closeCallback   func()
+}
 
-	return func(message *CoAPMessage) {
-		mx.Lock()
-		defer mx.Unlock()
-
-		if next, err := localStateSecurityInputLayer(tr, message, ""); err != nil || !next {
-			return
-		}
-
-		MetricReceivedMessages.Inc()
-
-		respHandler = func(message *CoAPMessage, err error) {
-			if atomic.LoadInt32(&runnedHandler) == 1 {
-				return
-			}
-			atomic.StoreInt32(&runnedHandler, 1)
-
-			if err != nil {
-				return
-			}
-
-			requestOnReceive(r.getResourceForPathAndMethod(message.GetURIPath(), message.GetMethod()), tr, message)
-			closeCallback()
-			if len(bufBlock1) > 0 {
-				log.Debug(fmt.Sprintf("COALA U: %s, %s",
-					ByteCountBinary(int64(len(bufBlock1)*MAX_PAYLOAD_SIZE)),
-					ByteCountBinaryBits(int64(len(bufBlock1)*MAX_PAYLOAD_SIZE)*time.Second.Milliseconds()/(time.Since(downloadStartTime).Milliseconds()+1))))
-			}
-		}
-
-		totalBlocks1, bufBlock1 = localStateMessageHandlerSelector(tr, totalBlocks1, bufBlock1, message, respHandler)
+func newLocalState(r Resourcer, tr *transport, closeCallback func()) *localState {
+	return &localState{
+		bufBlock1:       make(map[int][]byte),
+		totalBlocks:     -1,
+		downloadStarted: time.Now(),
+		r:               r,
+		tr:              tr,
+		closeCallback:   closeCallback,
 	}
 }
 
-func localStateSecurityInputLayer(tr *transport, message *CoAPMessage, proxyAddr string) (isContinue bool, err error) {
+func (ls *localState) processMessage(message *CoAPMessage) {
+	ls.mx.Lock()
+	defer ls.mx.Unlock()
+
+	// Проверка безопасности
+	if ok, err := localStateSecurityInputLayer(ls.tr, message, ""); !ok || err != nil {
+		return
+	}
+
+	MetricReceivedMessages.Inc()
+
+	// Локальный обработчик, запускаемый вне критической секции
+	localRespHandler := func(msg *CoAPMessage, err error) {
+		if atomic.LoadInt32(&ls.runnedHandler) == 1 {
+			return
+		}
+		atomic.StoreInt32(&ls.runnedHandler, 1)
+		if err != nil {
+			return
+		}
+		requestOnReceive(ls.r.getResourceForPathAndMethod(msg.GetURIPath(), msg.GetMethod()), ls.tr, msg)
+		ls.closeCallback() // Удаляем состояние после завершения
+		if len(ls.bufBlock1) > 0 {
+			log.Debug(fmt.Sprintf("COALA U: %s, %s",
+				ByteCountBinary(int64(len(ls.bufBlock1)*MAX_PAYLOAD_SIZE)),
+				ByteCountBinaryBits(int64(len(ls.bufBlock1)*MAX_PAYLOAD_SIZE)*time.Second.Milliseconds()/(time.Since(ls.downloadStarted).Milliseconds()+1))))
+		}
+	}
+
+	// Обновляем состояние (фрагментация/сборка блоков)
+	ls.totalBlocks, ls.bufBlock1 = localStateMessageHandlerSelector(ls.tr, ls.totalBlocks, ls.bufBlock1, message, localRespHandler)
+}
+
+func MakeLocalStateFn(r Resourcer, tr *transport, _ func(*CoAPMessage, error), closeCallback func()) LocalStateFn {
+	ls := newLocalState(r, tr, closeCallback)
+	return ls.processMessage
+}
+
+func localStateSecurityInputLayer(tr *transport, message *CoAPMessage, proxyAddr string) (bool, error) {
 	if len(proxyAddr) > 0 {
 		proxyID, ok := getProxyIDIfNeed(proxyAddr, tr.conn.LocalAddr().String())
 		if ok {
@@ -66,12 +85,9 @@ func localStateSecurityInputLayer(tr *transport, message *CoAPMessage, proxyAddr
 		return false, err
 	}
 
-	// Check if the message has coaps:// scheme and requires a new Session
 	if message.GetScheme() == COAPS_SCHEME {
 		addressSession := message.Sender.String()
-
 		currentSession, ok := getSessionForAddress(tr, tr.conn.LocalAddr().String(), addressSession, proxyAddr)
-
 		if !ok {
 			responseMessage := NewCoAPMessageId(ACK, CoapCodeUnauthorized, message.MessageID)
 			responseMessage.AddOption(OptionSessionNotFound, 1)
@@ -79,8 +95,6 @@ func localStateSecurityInputLayer(tr *transport, message *CoAPMessage, proxyAddr
 			tr.SendTo(responseMessage, message.Sender)
 			return false, ErrorClientSessionNotFound
 		}
-
-		// Decrypt message payload
 		err := decrypt(message, currentSession.AEAD)
 		if err != nil {
 			deleteSessionForAddress(tr.conn.LocalAddr().String(), addressSession, proxyAddr)
@@ -90,11 +104,9 @@ func localStateSecurityInputLayer(tr *transport, message *CoAPMessage, proxyAddr
 			tr.SendTo(responseMessage, message.Sender)
 			return false, ErrorClientSessionExpired
 		}
-
 		message.PeerPublicKey = currentSession.PeerPublicKey
 	}
 
-	/* Receive Errors */
 	sessionNotFound := message.GetOption(OptionSessionNotFound)
 	sessionExpired := message.GetOption(OptionSessionExpired)
 	if message.Code == CoapCodeUnauthorized {
@@ -115,12 +127,9 @@ func localStateMessageHandlerSelector(
 	sr *transport,
 	totalBlocks int,
 	buffer map[int][]byte,
-
 	message *CoAPMessage,
 	respHandler func(*CoAPMessage, error),
-) (
-	int, map[int][]byte,
-) {
+) (int, map[int][]byte) {
 	block1 := message.GetBlock1()
 	block2 := message.GetBlock2()
 
@@ -141,9 +150,7 @@ func localStateMessageHandlerSelector(
 	if block2 != nil {
 		if message.Type == ACK {
 			id := message.Sender.String() + string(message.Token)
-
-			c, ok := sr.block2channels.Load(id)
-			if ok {
+			if c, ok := sr.block2channels.Load(id); ok {
 				c.(chan *CoAPMessage) <- message
 			}
 		}
@@ -161,7 +168,6 @@ func localStateReceiveARQBlock1(sr *transport, totalBlocks int, buf map[int][]by
 	if !block.MoreBlocks {
 		totalBlocks = block.BlockNumber + 1
 	}
-
 	buf[block.BlockNumber] = inputMessage.Payload.Bytes()
 	if totalBlocks == len(buf) {
 		b := []byte{}

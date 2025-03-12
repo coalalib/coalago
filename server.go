@@ -19,25 +19,23 @@ type Server struct {
 	sr          *transport
 	resources   sync.Map
 	privatekey  []byte
+	addr        string // сохраняем адрес для Refresh()
 }
 
 func NewServer() *Server {
-	s := new(Server)
-	return s
+	return &Server{}
 }
 
 func NewServerWithPrivateKey(privatekey []byte) *Server {
-	s := NewServer()
-	s.privatekey = privatekey
-
-	return s
+	return &Server{privatekey: privatekey}
 }
 
 type Resourcer interface {
 	getResourceForPathAndMethod(path string, method CoapMethod) *CoAPResource
 }
 
-func (s *Server) Listen(addr string) (err error) {
+func (s *Server) Listen(addr string) error {
+	s.addr = addr // сохраняем адрес для будущего рестарта
 	conn, err := newListener(addr)
 	if err != nil {
 		return err
@@ -48,57 +46,71 @@ func (s *Server) Listen(addr string) (err error) {
 	log.Info(fmt.Sprintf(
 		"COALAServer start ADDR: %s, WS: %d, MinWS: %d, MaxWS: %d, Retransmit:%d, timeWait:%d, poolExpiration:%d",
 		addr, DEFAULT_WINDOW_SIZE, MIN_WiNDOW_SIZE, MAX_WINDOW_SIZE, maxSendAttempts, timeWait, SESSIONS_POOL_EXPIRATION))
+
+	s.listenLoop() // блокирующий цикл прослушивания
+	return nil
+}
+
+func (s *Server) listenLoop() {
 	for {
 		readBuf := make([]byte, MTU+1)
-	start:
 		n, senderAddr, err := s.sr.conn.Listen(readBuf)
 		if err != nil {
 			panic(err)
 		}
-		if n == 0 {
-			goto start
-		}
-		if n > MTU {
-			MetricMaxMTU.Inc()
-			goto start
+		if n == 0 || n > MTU {
+			if n > MTU {
+				MetricMaxMTU.Inc()
+			}
+			continue
 		}
 
 		message, err := preparationReceivingBufferForStorageLocalStates(readBuf[:n], senderAddr)
 		if err != nil {
-			goto start
+			continue
 		}
 
 		id := senderAddr.String() + message.GetTokenString()
-		fn, ok := StorageLocalStates.Get(id)
-		if !ok {
-			fn = MakeLocalStateFn(s, s.sr, nil, func() {
-				StorageLocalStates.Delete(id)
-			})
-		}
-		StorageLocalStates.SetDefault(id, fn)
-
+		fn, _ := StorageLocalStates.LoadOrStore(id, MakeLocalStateFn(s, s.sr, nil, func() {
+			StorageLocalStates.Delete(id)
+		}))
 		go fn.(LocalStateFn)(message)
 	}
 }
 
-func (s *Server) Serve(conn *net.UDPConn) {
-	c := new(connection)
-	c.conn = conn
-	s.sr = newtransport(c)
+func (s *Server) Refresh() error {
+	if s.addr == "" {
+		return fmt.Errorf("server address not set")
+	}
+	// Закрываем старое соединение, если возможно
+	if s.sr != nil && s.sr.conn != nil {
+		if closer, ok := s.sr.conn.(interface{ Close() error }); ok {
+			closer.Close()
+		}
+	}
+	conn, err := newListener(s.addr)
+	if err != nil {
+		return err
+	}
+	s.sr = newtransport(conn)
 	s.sr.privateKey = s.privatekey
 
+	go s.listenLoop() // перезапускаем цикл прослушивания в горутине
+	log.Info(fmt.Sprintf("COALAServer refreshed on ADDR: %s", s.addr))
+	return nil
+}
+
+func (s *Server) Serve(conn *net.UDPConn) {
+	c := &connection{conn: conn}
+	s.sr = newtransport(c)
+	s.sr.privateKey = s.privatekey
 }
 
 func (s *Server) ServeMessage(message *CoAPMessage) {
 	id := message.Sender.String() + message.GetTokenString()
-	fn, ok := StorageLocalStates.Get(id)
-	if !ok {
-		fn = MakeLocalStateFn(s, s.sr, nil, func() {
-			StorageLocalStates.Delete(id)
-		})
-		StorageLocalStates.SetDefault(id, fn)
-	}
-
+	fn, _ := StorageLocalStates.LoadOrStore(id, MakeLocalStateFn(s, s.sr, nil, func() {
+		StorageLocalStates.Delete(id)
+	}))
 	go fn.(LocalStateFn)(message)
 }
 
@@ -125,13 +137,11 @@ func (s *Server) DELETE(path string, handler CoAPResourceHandler) {
 
 func (s *Server) getResourceForPathAndMethod(path string, method CoapMethod) *CoAPResource {
 	path = strings.Trim(path, "/ ")
-	key := path + fmt.Sprint(method)
-	res, ok := s.resources.Load("*" + fmt.Sprint(method))
-	if ok {
+	if res, ok := s.resources.Load("*" + fmt.Sprint(method)); ok {
 		return res.(*CoAPResource)
 	}
-	res, ok = s.resources.Load(key)
-	if ok {
+	key := path + fmt.Sprint(method)
+	if res, ok := s.resources.Load(key); ok {
 		return res.(*CoAPResource)
 	}
 	return nil
