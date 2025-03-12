@@ -332,7 +332,6 @@ func newBlockingMessage(
 
 type stateSend struct {
 	lenght       int
-	offset       int
 	start        int
 	stop         int
 	nextNumBlock int
