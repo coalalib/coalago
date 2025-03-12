@@ -5,8 +5,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	log "github.com/ndmsystems/golog"
 )
 
 var StorageLocalStates sync.Map // Используем sync.Map с LoadOrStore
@@ -57,11 +55,6 @@ func (ls *localState) processMessage(message *CoAPMessage) {
 		}
 		requestOnReceive(ls.r.getResourceForPathAndMethod(msg.GetURIPath(), msg.GetMethod()), ls.tr, msg)
 		ls.closeCallback() // Удаляем состояние после завершения
-		if len(ls.bufBlock1) > 0 {
-			log.Debug(fmt.Sprintf("COALA U: %s, %s",
-				ByteCountBinary(int64(len(ls.bufBlock1)*MAX_PAYLOAD_SIZE)),
-				ByteCountBinaryBits(int64(len(ls.bufBlock1)*MAX_PAYLOAD_SIZE)*time.Second.Milliseconds()/(time.Since(ls.downloadStarted).Milliseconds()+1))))
-		}
 	}
 
 	// Обновляем состояние (фрагментация/сборка блоков)

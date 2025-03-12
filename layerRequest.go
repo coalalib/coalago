@@ -28,7 +28,7 @@ func requestOnReceive(resource *CoAPResource, sr *transport, message *CoAPMessag
 	}
 
 	if message.Type == CON {
-		return noResultResourceHandler(sr, message)
+		return false
 	}
 	return false
 }
@@ -85,19 +85,6 @@ func returnResultFromResource(sr *transport, message *CoAPMessage, handlerResult
 
 	_, err := sr.SendTo(responseMessage, message.Sender)
 	return err != nil
-}
-
-func noResultResourceHandler(sr *transport, message *CoAPMessage) bool {
-	// responseMessage := NewCoAPMessageId(ACK, CoapCodeInternalServerError, message.MessageID)
-	// responseMessage.Payload = NewStringPayload("No Result was returned by Resource Handler")
-	// if message.Token != nil && len(message.Token) > 0 {
-	// 	responseMessage.Token = message.Token
-	// }
-	// responseMessage.CloneOptions(message, OptionBlock1, OptionBlock2)
-
-	// _, err := server.sr.SendTo(responseMessage, message.Sender)
-	// return err != nil
-	return false
 }
 
 func noResource(sr *transport, message *CoAPMessage) bool {

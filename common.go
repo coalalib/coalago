@@ -69,7 +69,7 @@ func getOptionHeaderValue(optValue int) (int, error) {
 	case optValue <= 65804:
 		return 14, nil
 	}
-	return 0, errors.New("Invalid Option Delta")
+	return 0, errors.New("invalid Option Delta")
 }
 
 // Validates a message object and returns any error upon validation failure
@@ -153,21 +153,6 @@ func encodeInt(v uint32) []byte {
 		binary.BigEndian.PutUint32(rv, uint32(v))
 		return rv
 	}
-}
-
-// Gets the string representation of a CoAP Method code (e.g. GET, PUT, DELETE etc)
-func methodString(c CoapMethod) string {
-	switch c {
-	case CoapMethodGet:
-		return "GET"
-	case CoapMethodDelete:
-		return "DEL"
-	case CoapMethodPost:
-		return "POST"
-	case CoapMethodPut:
-		return "PUT"
-	}
-	return ""
 }
 
 func typeString(c CoapType) string {
@@ -347,7 +332,6 @@ func newBlockingMessage(
 
 type stateSend struct {
 	lenght       int
-	offset       int
 	start        int
 	stop         int
 	nextNumBlock int

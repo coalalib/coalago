@@ -7,14 +7,6 @@ import (
 	"github.com/patrickmn/go-cache"
 )
 
-type sessionStorage interface {
-	Set(sender string, receiver string, proxy string, sess session.SecuredSession)
-	Get(sender string, receiver string, proxy string) (session.SecuredSession, bool)
-	Delete(sender string, receiver string, proxy string)
-	ItemCount() int
-	LoadOrStore(sender string, receiver string, proxy string, sess session.SecuredSession) (session.SecuredSession, bool)
-}
-
 type sessionStorageImpl struct {
 	storage *cache.Cache
 }

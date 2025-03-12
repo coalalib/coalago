@@ -2,17 +2,9 @@ package coalago
 
 import (
 	"fmt"
-	"net"
 	"strings"
 	"sync"
-
-	log "github.com/ndmsystems/golog"
 )
-
-type rawData struct {
-	buff   []byte
-	sender net.Addr
-}
 
 type Server struct {
 	proxyEnable bool
@@ -20,7 +12,7 @@ type Server struct {
 	resources   sync.Map
 	privatekey  []byte
 	bq          backwardStorage
-  addr        string // сохраняем адрес для Refresh()
+	addr        string // сохраняем адрес для Refresh()
 
 }
 
@@ -49,9 +41,9 @@ func (s *Server) Listen(addr string) error {
 
 	s.sr = newtransport(conn)
 	s.sr.privateKey = s.privatekey
-	log.Info(fmt.Sprintf(
-		"COALAServer start ADDR: %s, WS: %d, MinWS: %d, MaxWS: %d, Retransmit:%d, timeWait:%d, poolExpiration:%d",
-		addr, DEFAULT_WINDOW_SIZE, MIN_WiNDOW_SIZE, MAX_WINDOW_SIZE, maxSendAttempts, timeWait, SESSIONS_POOL_EXPIRATION))
+	fmt.Printf(
+		"COALA server start ADDR: %s, WS: %d, MinWS: %d, MaxWS: %d, Retransmit:%d, timeWait:%d, poolExpiration:%d",
+		addr, DEFAULT_WINDOW_SIZE, MIN_WiNDOW_SIZE, MAX_WINDOW_SIZE, maxSendAttempts, timeWait, SESSIONS_POOL_EXPIRATION)
 
 	s.listenLoop() // блокирующий цикл прослушивания
 	return nil
@@ -62,7 +54,12 @@ func (s *Server) listenLoop() {
 		readBuf := make([]byte, MTU+1)
 		n, senderAddr, err := s.sr.conn.Listen(readBuf)
 		if err != nil {
-			panic(err)
+			if strings.Contains(err.Error(), "use of closed network connection") {
+				fmt.Println("coonection was closed")
+				return
+			}
+			fmt.Printf("read error: %v", err)
+			continue
 		}
 		if n == 0 || n > MTU {
 			if n > MTU {
@@ -107,15 +104,17 @@ func (s *Server) Refresh() error {
 	s.sr.privateKey = s.privatekey
 
 	go s.listenLoop() // перезапускаем цикл прослушивания в горутине
-	log.Info(fmt.Sprintf("COALAServer refreshed on ADDR: %s", s.addr))
+	fmt.Printf("server refreshed on ADDR: %s", s.addr)
 	return nil
 }
 
+/*
 func (s *Server) Serve(conn *net.UDPConn) {
 	c := &connection{conn: conn}
 	s.sr = newtransport(c)
 	s.sr.privateKey = s.privatekey
 }
+*/
 
 func (s *Server) ServeMessage(message *CoAPMessage) {
 	id := message.Sender.String() + message.GetTokenString()
