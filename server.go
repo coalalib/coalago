@@ -78,7 +78,7 @@ func (s *Server) listenLoop() {
 
 		if s.bq.Has(message.MessageID) {
 			s.bq.Write(message)
-			goto start
+			continue
 		}
 
 		id := senderAddr.String() + message.GetTokenString()
