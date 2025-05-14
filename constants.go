@@ -5,13 +5,11 @@ import (
 	"time"
 )
 
-var (
-	timeWait        = time.Second
-	maxSendAttempts = 6
-)
-
 const (
-	SESSIONS_POOL_EXPIRATION = time.Second * 60 * 2
+	timeWait                 = time.Second
+	maxSendAttempts          = 6
+	maxParallel              = 10000 // max parallel connections
+	SESSIONS_POOL_EXPIRATION = time.Second * 60 * 3
 	MAX_PAYLOAD_SIZE         = 1024
 	DEFAULT_WINDOW_SIZE      = 300
 	MIN_WiNDOW_SIZE          = 50

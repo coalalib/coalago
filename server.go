@@ -147,17 +147,20 @@ func (s *Server) getResourceForPathAndMethod(path string, method CoapMethod) *Co
 }
 
 func (s *Server) listenLoop() {
+	semaphore := make(chan struct{}, maxParallel)
+
 	for {
 		readBuf := make([]byte, MTU+1)
 		n, senderAddr, err := s.sr.conn.Listen(readBuf)
 		if err != nil {
 			if strings.Contains(err.Error(), "use of closed network connection") {
-				fmt.Println("coonection was closed")
+				fmt.Println("connection was closed")
 				return
 			}
-			fmt.Printf("read error: %v", err)
+			fmt.Printf("read error: %v\n", err)
 			continue
 		}
+
 		if n == 0 || n > MTU {
 			if n > MTU {
 				MetricMaxMTU.Inc()
@@ -176,9 +179,19 @@ func (s *Server) listenLoop() {
 		}
 
 		id := senderAddr.String() + message.GetTokenString()
-		fn, _ := StorageLocalStates.LoadOrStore(id, MakeLocalStateFn(s, s.sr, nil, func() {
-			StorageLocalStates.Delete(id)
-		}))
-		go fn.(LocalStateFn)(message)
+		fnIface, _ := StorageLocalStates.LoadOrStore(id, MakeLocalStateFn(s, s.sr, nil, nil))
+
+		semaphore <- struct{}{}
+
+		go func(id string, fn LocalStateFn, msg *CoAPMessage) {
+			defer StorageLocalStates.Delete(id)
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Printf("panic in handler: %v\n", r)
+				}
+			}()
+			defer func() { <-semaphore }()
+			fn(msg)
+		}(id, fnIface.(LocalStateFn), message)
 	}
 }
