@@ -179,7 +179,9 @@ func (s *Server) listenLoop() {
 		}
 
 		id := senderAddr.String() + message.GetTokenString()
-		fnIface, _ := StorageLocalStates.LoadOrStore(id, MakeLocalStateFn(s, s.sr, nil, nil))
+		fnIface, _ := StorageLocalStates.LoadOrStore(id, MakeLocalStateFn(s, s.sr, nil, func() {
+			StorageLocalStates.Delete(id)
+		}))
 
 		semaphore <- struct{}{}
 
