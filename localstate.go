@@ -26,14 +26,13 @@ type localState struct {
 	closeCallback   func()
 }
 
-func newLocalState(r Resourcer, tr *transport, closeCallback func()) *localState {
+func newLocalState(r Resourcer, tr *transport) *localState {
 	return &localState{
 		bufBlock1:       make(map[int][]byte),
 		totalBlocks:     -1,
 		downloadStarted: time.Now(),
 		r:               r,
 		tr:              tr,
-		closeCallback:   closeCallback,
 	}
 }
 
@@ -58,15 +57,13 @@ func (ls *localState) processMessage(message *CoAPMessage) {
 			return
 		}
 		requestOnReceive(ls.r.getResourceForPathAndMethod(msg.GetURIPath(), msg.GetMethod()), ls.tr, msg)
-		ls.closeCallback() // Удаляем состояние после завершения
 	}
-
 	// Обновляем состояние (фрагментация/сборка блоков)
 	ls.totalBlocks, ls.bufBlock1 = localStateMessageHandlerSelector(ls.tr, ls.totalBlocks, ls.bufBlock1, message, localRespHandler)
 }
 
-func MakeLocalStateFn(r Resourcer, tr *transport, _ func(*CoAPMessage, error), closeCallback func()) LocalStateFn {
-	ls := newLocalState(r, tr, closeCallback)
+func MakeLocalStateFn(r Resourcer, tr *transport, _ func(*CoAPMessage, error)) LocalStateFn {
+	ls := newLocalState(r, tr)
 	return ls.processMessage
 }
 

@@ -123,10 +123,16 @@ func (s *Server) Serve(conn *net.UDPConn) {
 // нужно для прокси сервиса
 func (s *Server) ServeMessage(message *CoAPMessage) {
 	id := message.Sender.String() + message.GetTokenString()
-	fn, _ := StorageLocalStates.LoadOrStore(id, MakeLocalStateFn(s, s.sr, nil, func() {
-		StorageLocalStates.Delete(id)
-	}))
-	go fn.(LocalStateFn)(message)
+	fnIface, _ := StorageLocalStates.LoadOrStore(id, MakeLocalStateFn(s, s.sr, nil))
+	go func(id string, fn LocalStateFn, msg *CoAPMessage) {
+		defer StorageLocalStates.Delete(id)
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Printf("panic in handler: %v\n", r)
+			}
+		}()
+		fn(msg)
+	}(id, fnIface.(LocalStateFn), message)
 }
 
 func (s *Server) addResource(res *CoAPResource) {
@@ -179,9 +185,7 @@ func (s *Server) listenLoop() {
 		}
 
 		id := senderAddr.String() + message.GetTokenString()
-		fnIface, _ := StorageLocalStates.LoadOrStore(id, MakeLocalStateFn(s, s.sr, nil, func() {
-			StorageLocalStates.Delete(id)
-		}))
+		fnIface, _ := StorageLocalStates.LoadOrStore(id, MakeLocalStateFn(s, s.sr, nil))
 
 		semaphore <- struct{}{}
 
