@@ -12,8 +12,8 @@ import (
 
 var (
 	ErrUnsupportedType = errors.New("unsupported type of message")
-	globalSessions     = newSessionStorageImpl()
-	proxyIDSessions    = newProxySessionStorage()
+	globalSessions     = newSessionStorageImpl(SESSIONS_POOL_EXPIRATION)
+	proxyIDSessions    = newProxySessionStorage(SESSIONS_POOL_EXPIRATION)
 )
 
 type transport struct {
