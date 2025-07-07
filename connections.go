@@ -7,9 +7,9 @@ import (
 )
 
 var NumberConnections = 1024
-var globalPoolConnections = newConnpool()
+var globalPoolConnections = newConnpool(false)
 
-type dialer interface {
+type Transport interface {
 	Close() error
 	Listen([]byte) (int, net.Addr, error)
 	Read(buff []byte) (int, error)
@@ -74,7 +74,7 @@ func (c *connection) WriteTo(buf []byte, addr string) (int, error) {
 	return c.conn.WriteTo(buf, a)
 }
 
-func newDialer(end chan struct{}, addr string) (dialer, error) {
+func newDialer(end chan struct{}, addr string) (Transport, error) {
 	a, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
 		return nil, err
@@ -88,7 +88,7 @@ func newDialer(end chan struct{}, addr string) (dialer, error) {
 	return &connection{conn: conn, end: end}, nil
 }
 
-func newListener(addr string) (dialer, error) {
+func newListener(addr string) (Transport, error) {
 	a, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
 		return nil, err
@@ -103,15 +103,20 @@ func newListener(addr string) (dialer, error) {
 
 type connpool struct {
 	balance chan struct{}
+	useTCP  bool
 }
 
-func newConnpool() *connpool {
+func newConnpool(useTCP bool) *connpool {
 	return &connpool{
 		balance: make(chan struct{}, NumberConnections),
+		useTCP:  useTCP,
 	}
 }
 
-func (c *connpool) Dial(addr string) (dialer, error) {
+func (c *connpool) Dial(addr string) (Transport, error) {
+	if c.useTCP {
+		return newDialerTCP(addr)
+	}
 	return newDialer(c.balance, addr)
 }
 
@@ -156,4 +161,12 @@ func receiveMessage(tr *transport, origMessage *CoAPMessage) (*CoAPMessage, erro
 		}
 		return message, nil
 	}
+}
+
+// NewTransport создает транспорт (UDP или TCP) по флагу useTCP
+func NewTransport(addr string, useTCP bool) (Transport, error) {
+	if useTCP {
+		return newDialerTCP(addr)
+	}
+	return newDialer(make(chan struct{}, 1), addr)
 }

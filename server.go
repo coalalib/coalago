@@ -2,7 +2,9 @@ package coalago
 
 import (
 	"fmt"
+	"io"
 	"net"
+	"net/url"
 	"strings"
 	"sync"
 )
@@ -14,24 +16,35 @@ type Server struct {
 	privatekey  []byte
 	bq          backwardStorage
 	addr        string // сохраняем адрес для Refresh()
-
+	useTCP      bool
 }
 
-func NewServer() *Server {
+func NewServer(opts ...Opt) *Server {
+	options := &coalaopts{}
+	for _, opt := range opts {
+		opt(options)
+	}
+
 	return &Server{
 		bq: backwardStorage{
 			m: make(map[uint16]chan *CoAPMessage),
 		},
+		privatekey: options.privatekey,
 	}
 }
 
-func NewServerWithPrivateKey(privatekey []byte) *Server {
-	return &Server{privatekey: privatekey}
+func (s *Server) ListenTCP(addr string) error {
+	s.addr = addr
+	s.useTCP = true
+	return s.listenTCP(addr)
 }
 
 func (s *Server) Listen(addr string) error {
 	s.addr = addr // сохраняем адрес для будущего рестарта
-	conn, err := newListener(addr)
+
+	var conn Transport
+	var err error
+	conn, err = newListener(addr)
 	if err != nil {
 		return err
 	}
@@ -39,11 +52,89 @@ func (s *Server) Listen(addr string) error {
 	s.sr = newtransport(conn)
 	s.sr.privateKey = s.privatekey
 	fmt.Printf(
-		"COALA server start ADDR: %s, WS: %d, MinWS: %d, MaxWS: %d, Retransmit:%d, timeWait:%d, poolExpiration:%d",
+		"COALA server start ADDR: %s, WS: %d, MinWS: %d, MaxWS: %d, Retransmit:%d, timeWait:%d, poolExpiration:%d\n",
 		addr, DEFAULT_WINDOW_SIZE, MIN_WiNDOW_SIZE, MAX_WINDOW_SIZE, maxSendAttempts, timeWait, SESSIONS_POOL_EXPIRATION)
 
 	s.listenLoop() // блокирующий цикл прослушивания
 	return nil
+}
+
+func (s *Server) listenTCP(addr string) error {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("COALA TCP server start ADDR: %s\n", addr)
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			fmt.Println("accept error:", err)
+			continue
+		}
+
+		go s.HandleTCPConn(conn)
+	}
+}
+
+func (s *Server) HandleTCPConn(conn net.Conn) {
+	tcpConnMap.Store(conn.RemoteAddr().String(), conn)
+	defer func() {
+		conn.Close()
+		tcpConnMap.Delete(conn.RemoteAddr().String())
+	}()
+	tcpTr := newtransport(&tcpConnection{conn: conn.(*net.TCPConn)})
+
+	buf := make([]byte, 65536)
+	for {
+		n, err := ReadTcpFrame(conn, buf)
+		if err != nil {
+			if err != io.EOF {
+				fmt.Println("readFrame error:", err)
+			}
+			return
+		}
+
+		msg, err := Deserialize(buf[:n])
+		if err != nil {
+			fmt.Println("deserialize error:", err)
+			continue
+		}
+
+		msg.Sender = conn.RemoteAddr()
+		proxyUri := msg.GetOptionProxyURIasString()
+		if proxyUri == "" {
+			if s.bq.Has(msg.MessageID) {
+				s.bq.Write(msg)
+				continue
+			}
+
+			go s.processLocalState(msg, tcpTr)
+			continue
+		}
+
+		go func() {
+			parsedURL, err := url.Parse(proxyUri)
+			if err != nil {
+				fmt.Println("parse proxyUri error:", err)
+				return
+			}
+
+			msg.RemoveOptions(OptionProxyScheme)
+			msg.RemoveOptions(OptionProxyURI)
+
+			fmt.Println("proxy send to", parsedURL.Host)
+
+			msg, err = s.Send(msg, parsedURL.Host)
+			if err != nil {
+				fmt.Println("send error:", err)
+				return
+			}
+
+			b, _ := Serialize(msg)
+			WriteTcpFrame(conn, b)
+		}()
+	}
 }
 
 func (s *Server) Refresh() error {
@@ -56,10 +147,17 @@ func (s *Server) Refresh() error {
 			closer.Close()
 		}
 	}
-	conn, err := newListener(s.addr)
+	var conn Transport
+	var err error
+	if s.useTCP {
+		conn, err = newListenerTCP(s.addr)
+	} else {
+		conn, err = newListener(s.addr)
+	}
 	if err != nil {
 		return err
 	}
+
 	s.sr = newtransport(conn)
 	s.sr.privateKey = s.privatekey
 
@@ -103,6 +201,21 @@ func (s *Server) Send(message *CoAPMessage, addr string) (*CoAPMessage, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	if s.useTCP {
+		conn, ok := tcpConnMap.Load(addr)
+		if !ok {
+			return nil, fmt.Errorf("connection not found")
+		}
+
+		_, err = WriteTcpFrame(conn.(*net.TCPConn), b)
+		if err != nil {
+			return nil, err
+		}
+
+		return s.bq.Read(message.MessageID)
+	}
+
 	_, err = s.sr.conn.WriteTo(b, addr)
 	if err != nil {
 		return nil, err
@@ -122,17 +235,20 @@ func (s *Server) Serve(conn *net.UDPConn) {
 // ServeMessage обрабатывает сообщение, как если бы оно пришло от клиента
 // нужно для прокси сервиса
 func (s *Server) ServeMessage(message *CoAPMessage) {
+	go s.processLocalState(message, s.sr)
+}
+
+func (s *Server) processLocalState(message *CoAPMessage, tr *transport) {
 	id := message.Sender.String() + message.GetTokenString()
-	fnIface, _ := StorageLocalStates.LoadOrStore(id, MakeLocalStateFn(s, s.sr, nil))
-	go func(id string, fn LocalStateFn, msg *CoAPMessage) {
-		defer StorageLocalStates.Delete(id)
-		defer func() {
-			if r := recover(); r != nil {
-				fmt.Printf("panic in handler: %v\n", r)
-			}
-		}()
-		fn(msg)
-	}(id, fnIface.(LocalStateFn), message)
+	fnIfase, _ := StorageLocalStates.LoadOrStore(id, MakeLocalStateFn(s, tr, nil))
+	defer StorageLocalStates.Delete(id)
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("panic in handler: %v\n", r)
+		}
+	}()
+
+	fnIfase.(LocalStateFn)(message)
 }
 
 func (s *Server) addResource(res *CoAPResource) {
@@ -184,20 +300,8 @@ func (s *Server) listenLoop() {
 			continue
 		}
 
-		id := senderAddr.String() + message.GetTokenString()
-		fnIface, _ := StorageLocalStates.LoadOrStore(id, MakeLocalStateFn(s, s.sr, nil))
-
 		semaphore <- struct{}{}
 
-		go func(id string, fn LocalStateFn, msg *CoAPMessage) {
-			defer StorageLocalStates.Delete(id)
-			defer func() {
-				if r := recover(); r != nil {
-					fmt.Printf("panic in handler: %v\n", r)
-				}
-			}()
-			defer func() { <-semaphore }()
-			fn(msg)
-		}(id, fnIface.(LocalStateFn), message)
+		go s.processLocalState(message, s.sr)
 	}
 }

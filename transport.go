@@ -17,12 +17,12 @@ var (
 )
 
 type transport struct {
-	conn           dialer
+	conn           Transport
 	block2channels sync.Map
 	privateKey     []byte
 }
 
-func newtransport(conn dialer) *transport {
+func newtransport(conn Transport) *transport {
 	sr := new(transport)
 	sr.conn = conn
 
@@ -617,7 +617,6 @@ func preparationReceivingBufferForStorageLocalStates(data []byte, senderAddr net
 	}
 
 	MetricReceivedMessages.Inc()
-
 	message.Sender = senderAddr
 
 	return message, nil

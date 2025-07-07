@@ -15,20 +15,37 @@ type Response struct {
 // Client для отправки CoAP-запросов
 type Client struct {
 	privateKey []byte
+	useTCP     bool
+	pool       *connpool
 }
 
-func NewClient() *Client {
-	return &Client{}
+func NewClient(opts ...Opt) *Client {
+	options := &coalaopts{}
+	for _, opt := range opts {
+		opt(options)
+	}
+
+	return &Client{
+		privateKey: options.privatekey,
+		pool:       newConnpool(false),
+	}
 }
 
-func NewClientWithPrivateKey(pk []byte) *Client {
-	return &Client{privateKey: pk}
+func NewTCPClient(opts ...Opt) *Client {
+	options := &coalaopts{}
+	for _, opt := range opts {
+		opt(options)
+	}
+	return &Client{
+		privateKey: options.privatekey,
+		pool:       newConnpool(true),
+	}
 }
 
 func (c *Client) Send(message *CoAPMessage, addr string, options ...*CoAPMessageOption) (*Response, error) {
 	message.AddOptions(options)
 
-	conn, err := globalPoolConnections.Dial(addr)
+	conn, err := c.pool.Dial(addr)
 	if err != nil {
 		return nil, err
 	}
@@ -59,7 +76,7 @@ func (c *Client) GET(uri string, opts ...*CoAPMessageOption) (*Response, error) 
 		return nil, err
 	}
 	msg.AddOptions(opts)
-	return clientSendCONMessage(msg, c.privateKey, msg.Recipient.String())
+	return c.sendCONMessage(msg)
 }
 
 func (c *Client) POST(data []byte, uri string, opts ...*CoAPMessageOption) (*Response, error) {
@@ -69,7 +86,7 @@ func (c *Client) POST(data []byte, uri string, opts ...*CoAPMessageOption) (*Res
 	}
 	msg.AddOptions(opts)
 	msg.Payload = NewBytesPayload(data)
-	return clientSendCONMessage(msg, c.privateKey, msg.Recipient.String())
+	return c.sendCONMessage(msg)
 }
 
 func (c *Client) DELETE(data []byte, uri string, opts ...*CoAPMessageOption) (*Response, error) {
@@ -78,11 +95,11 @@ func (c *Client) DELETE(data []byte, uri string, opts ...*CoAPMessageOption) (*R
 		return nil, err
 	}
 	msg.AddOptions(opts)
-	return clientSendCONMessage(msg, c.privateKey, msg.Recipient.String())
+	return c.sendCONMessage(msg)
 }
 
-func clientSendCONMessage(msg *CoAPMessage, pk []byte, addr string) (*Response, error) {
-	resp, err := clientSendCON(msg, pk, addr)
+func (c *Client) sendCONMessage(msg *CoAPMessage) (*Response, error) {
+	resp, err := c.sendCON(msg)
 	if err != nil {
 		return nil, err
 	}
@@ -93,15 +110,15 @@ func clientSendCONMessage(msg *CoAPMessage, pk []byte, addr string) (*Response, 
 	}, nil
 }
 
-func clientSendCON(msg *CoAPMessage, pk []byte, addr string) (*CoAPMessage, error) {
-	conn, err := globalPoolConnections.Dial(addr)
+func (c *Client) sendCON(msg *CoAPMessage) (*CoAPMessage, error) {
+	conn, err := c.pool.Dial(msg.Recipient.String())
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Close()
 
 	sr := newtransport(conn)
-	sr.privateKey = pk
+	sr.privateKey = c.privateKey
 	return sr.Send(msg)
 }
 
@@ -113,9 +130,9 @@ func constructMessage(code CoapCode, uri string) (*CoAPMessage, error) {
 
 	msg := NewCoAPMessage(CON, code)
 	switch scheme {
-	case "coap":
+	case "coap", "coap+tcp":
 		msg.SetSchemeCOAP()
-	case "coaps":
+	case "coaps", "coaps+tcp":
 		msg.SetSchemeCOAPS()
 	default:
 		return nil, ErrUndefinedScheme
