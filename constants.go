@@ -285,4 +285,5 @@ var (
 	ErrorClientSessionExpired        = errors.New("client session expired")
 	ErrorHandshake                   = errors.New("error handshake")
 	ERR_KEYS_NOT_MATCH               = "expected and current public keys do not match"
+	ErrNotImplemented                = errors.New("not implemented")
 )
