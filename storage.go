@@ -1,6 +1,7 @@
 package coalago
 
 import (
+	"net"
 	"sync"
 	"time"
 
@@ -174,4 +175,43 @@ func (s *proxySessionStorage) Delete(key string) {
 
 func (s *proxySessionStorage) ItemCount() int {
 	return s.storage.ItemCount()
+}
+
+type connectionStorage struct {
+	storage *shardedCache
+}
+
+func newConnectionStorage(ttl time.Duration) *connectionStorage {
+	return &connectionStorage{
+		storage: newShardedCache(ttl),
+	}
+}
+
+func (c *connectionStorage) SetUDP(addr string) {
+	c.storage.Set("udp:"+addr, struct{}{})
+}
+
+func (c *connectionStorage) HasUDP(addr string) bool {
+	_, ok := c.storage.Get("udp:" + addr)
+	return ok
+}
+
+func (c *connectionStorage) SetTCP(addr string, conn net.Conn) {
+	c.storage.Set("tcp:"+addr, conn)
+}
+
+func (c *connectionStorage) GetTCP(addr string) (net.Conn, bool) {
+	v, ok := c.storage.Get("tcp:" + addr)
+	if !ok {
+		return nil, false
+	}
+	return v.(net.Conn), true
+}
+
+func (c *connectionStorage) DeleteTCP(addr string) {
+	c.storage.Delete("tcp:" + addr)
+}
+
+func (c *connectionStorage) DeleteUDP(addr string) {
+	c.storage.Delete("udp:" + addr)
 }

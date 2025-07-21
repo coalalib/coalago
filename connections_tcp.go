@@ -4,11 +4,8 @@ import (
 	"encoding/binary"
 	"io"
 	"net"
-	"sync"
 	"time"
 )
-
-var tcpConnMap sync.Map
 
 type tcpConnection struct {
 	conn *net.TCPConn
@@ -41,7 +38,7 @@ func (c *tcpConnection) Write(buf []byte) (int, error) {
 }
 
 // WriteTo для TCP игнорирует addr (point-to-point)
-func (c *tcpConnection) WriteTo(buf []byte, addr string) (int, error) {
+func (c *tcpConnection) WriteTo(buf []byte, _ string) (int, error) {
 	return WriteTcpFrame(c.conn, buf)
 }
 
@@ -61,23 +58,19 @@ func (c *tcpConnection) SetUDPRecvBuf(size int) int {
 // --- RFC 8323 framing helpers ---
 func encodeLength(length int) []byte {
 	switch {
-	case length < 1<<7:
+	case length <= 12:
 		return []byte{byte(length)}
-	case length < 1<<14:
-		b := make([]byte, 2)
-		b[0] = 0x80 | byte(length>>8)
-		b[1] = byte(length)
-		return b
-	case length < 1<<21:
+	case length <= 255+13:
+		return []byte{13, byte(length - 13)}
+	case length <= 65535+269:
 		b := make([]byte, 3)
-		b[0] = 0xC0 | byte(length>>16)
-		b[1] = byte(length >> 8)
-		b[2] = byte(length)
+		b[0] = 14
+		binary.BigEndian.PutUint16(b[1:], uint16(length-269))
 		return b
 	default:
 		b := make([]byte, 5)
-		b[0] = 0xE0
-		binary.BigEndian.PutUint32(b[1:], uint32(length))
+		b[0] = 15
+		binary.BigEndian.PutUint32(b[1:], uint32(length-65805))
 		return b
 	}
 }
@@ -88,32 +81,33 @@ func decodeLength(r io.Reader) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	switch {
-	case first[0]&0x80 == 0:
-		return int(first[0]), nil
-	case first[0]&0xC0 == 0x80:
+
+	length := int(first[0] & 0x0F) // Получаем 4-битное поле Length
+
+	switch length {
+	case 13:
 		var b [1]byte
 		_, err := io.ReadFull(r, b[:])
 		if err != nil {
 			return 0, err
 		}
-		return int(first[0]&0x3F)<<8 | int(b[0]), nil
-	case first[0]&0xE0 == 0xC0:
+		return int(b[0]) + 13, nil
+	case 14:
 		var b [2]byte
 		_, err := io.ReadFull(r, b[:])
 		if err != nil {
 			return 0, err
 		}
-		return int(first[0]&0x1F)<<16 | int(b[0])<<8 | int(b[1]), nil
-	case first[0] == 0xE0:
+		return int(binary.BigEndian.Uint16(b[:])) + 269, nil
+	case 15:
 		var b [4]byte
 		_, err := io.ReadFull(r, b[:])
 		if err != nil {
 			return 0, err
 		}
-		return int(binary.BigEndian.Uint32(b[:])), nil
+		return int(binary.BigEndian.Uint32(b[:])) + 65805, nil
 	default:
-		return 0, io.ErrUnexpectedEOF
+		return length, nil
 	}
 }
 
