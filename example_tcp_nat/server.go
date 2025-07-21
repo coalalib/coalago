@@ -31,6 +31,8 @@ func main() {
 	switch *mode {
 	case "client":
 		device(*addr)
+	case "clientUDP":
+		deviceUDP(*addr)
 	case "test":
 		if *proxy == "" {
 			fmt.Println("Usage: main --mode test --proxy <proxy_address>")
@@ -38,6 +40,14 @@ func main() {
 		}
 
 		test(*addr, *proxy)
+		return
+	case "test2":
+		if *proxy == "" {
+			fmt.Println("Usage: main --mode test2 --proxy <proxy_address>")
+			os.Exit(1)
+		}
+
+		testTCP(*addr, *proxy)
 		return
 	default:
 	}
@@ -52,6 +62,12 @@ func main() {
 	server.GET("/session", func(message *coalago.CoAPMessage) *coalago.CoAPResourceHandlerResult {
 		return coalago.NewResponse(coalago.NewStringPayload("session"), coalago.CoapCodeContent)
 	})
+
+	go func() {
+		if err := server.Listen(":5858"); err != nil {
+			fmt.Println("udp:", err.Error())
+		}
+	}()
 
 	panic(server.ListenTCP(":5858"))
 }

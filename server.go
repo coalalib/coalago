@@ -7,16 +7,29 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
+
+	"github.com/patrickmn/go-cache"
 )
 
+const (
+	ConnectionTypeUDP = 1 << iota // 1
+	ConnectionTypeTCP             // 2
+)
+
+type proxyNote struct {
+	addr string
+	tr   *transport
+}
+
 type Server struct {
-	proxyEnable bool
-	sr          *transport
-	resources   sync.Map
-	privatekey  []byte
-	bq          backwardStorage
-	addr        string // сохраняем адрес для Refresh()
-	useTCP      bool
+	proxyEnable    bool
+	sr             *transport
+	resources      sync.Map
+	privatekey     []byte
+	addr           string       // сохраняем адрес для Refresh()
+	connectionType uint8        // битовая маска для TCP/UDP
+	proxyCache     *cache.Cache // token + addr -> proxyNote
 }
 
 func NewServer(opts ...Opt) *Server {
@@ -26,21 +39,20 @@ func NewServer(opts ...Opt) *Server {
 	}
 
 	return &Server{
-		bq: backwardStorage{
-			m: make(map[uint16]chan *CoAPMessage),
-		},
 		privatekey: options.privatekey,
+		proxyCache: cache.New(time.Minute, time.Second), // token + addr -> proxyNote
 	}
 }
 
 func (s *Server) ListenTCP(addr string) error {
 	s.addr = addr
-	s.useTCP = true
+	s.connectionType |= ConnectionTypeTCP // устанавливаем бит TCP = 1
 	return s.listenTCP(addr)
 }
 
 func (s *Server) Listen(addr string) error {
-	s.addr = addr // сохраняем адрес для будущего рестарта
+	s.addr = addr                         // сохраняем адрес для будущего рестарта
+	s.connectionType |= ConnectionTypeUDP // устанавливаем бит UDP = 1
 
 	var conn Transport
 	var err error
@@ -78,11 +90,13 @@ func (s *Server) listenTCP(addr string) error {
 }
 
 func (s *Server) HandleTCPConn(conn net.Conn) {
-	tcpConnMap.Store(conn.RemoteAddr().String(), conn)
+	connStorage.SetTCP(conn.RemoteAddr().String(), conn)
+
 	defer func() {
 		conn.Close()
-		tcpConnMap.Delete(conn.RemoteAddr().String())
+		connStorage.DeleteTCP(conn.RemoteAddr().String())
 	}()
+
 	tcpTr := newtransport(&tcpConnection{conn: conn.(*net.TCPConn)})
 
 	buf := make([]byte, 65536)
@@ -95,6 +109,8 @@ func (s *Server) HandleTCPConn(conn net.Conn) {
 			return
 		}
 
+		connStorage.SetTCP(conn.RemoteAddr().String(), conn)
+
 		msg, err := Deserialize(buf[:n])
 		if err != nil {
 			fmt.Println("deserialize error:", err)
@@ -104,8 +120,10 @@ func (s *Server) HandleTCPConn(conn net.Conn) {
 		msg.Sender = conn.RemoteAddr()
 		proxyUri := msg.GetOptionProxyURIasString()
 		if proxyUri == "" {
-			if s.bq.Has(msg.MessageID) {
-				s.bq.Write(msg)
+			if v, ok := s.proxyCache.Get(msg.GetTokenString() + conn.RemoteAddr().String()); ok {
+				note := v.(*proxyNote)
+				s.proxyCache.SetDefault(msg.GetTokenString()+conn.RemoteAddr().String(), note)
+				note.tr.conn.WriteTo(buf[:n], note.addr)
 				continue
 			}
 
@@ -123,16 +141,12 @@ func (s *Server) HandleTCPConn(conn net.Conn) {
 			msg.RemoveOptions(OptionProxyScheme)
 			msg.RemoveOptions(OptionProxyURI)
 
-			fmt.Println("proxy send to", parsedURL.Host)
-
-			msg, err = s.Send(msg, parsedURL.Host)
-			if err != nil {
+			if err := s.sendTo(msg, parsedURL.Host); err != nil {
 				fmt.Println("send error:", err)
 				return
 			}
 
-			b, _ := Serialize(msg)
-			WriteTcpFrame(conn, b)
+			s.proxyCache.SetDefault(msg.GetTokenString()+parsedURL.Host, &proxyNote{addr: msg.Sender.String(), tr: tcpTr})
 		}()
 	}
 }
@@ -149,7 +163,7 @@ func (s *Server) Refresh() error {
 	}
 	var conn Transport
 	var err error
-	if s.useTCP {
+	if s.IsTCP() {
 		conn, err = newListenerTCP(s.addr)
 	} else {
 		conn, err = newListener(s.addr)
@@ -194,34 +208,43 @@ func (s *Server) GetPrivateKey() []byte {
 	return s.privatekey
 }
 
+func (s *Server) AddUDP(addr string) {
+	connStorage.SetUDP(addr)
+}
+
+func (s *Server) sendTo(message *CoAPMessage, addr string) error {
+	b, err := Serialize(message)
+	if err != nil {
+		return err
+	}
+
+	tr := s.sr
+	if conn, ok := connStorage.GetTCP(addr); ok {
+		tr = newtransport(&tcpConnection{conn: conn.(*net.TCPConn)})
+		fmt.Println("Send to TCP", addr)
+	}
+
+	_, err = tr.conn.WriteTo(b, addr)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // Send отправляет сообщение на указанный адрес и возвращает ответ
 // используется вместо клиента, когда нужно отправить запрос с занятого сервером порта
 func (s *Server) Send(message *CoAPMessage, addr string) (*CoAPMessage, error) {
-	b, err := Serialize(message)
+	if err := s.sendTo(message, addr); err != nil {
+		return nil, err
+	}
+
+	msg, err := bq.Read(message.GetTokenString() + addr)
 	if err != nil {
 		return nil, err
 	}
 
-	if s.useTCP {
-		conn, ok := tcpConnMap.Load(addr)
-		if !ok {
-			return nil, fmt.Errorf("connection not found")
-		}
-
-		_, err = WriteTcpFrame(conn.(*net.TCPConn), b)
-		if err != nil {
-			return nil, err
-		}
-
-		return s.bq.Read(message.MessageID)
-	}
-
-	_, err = s.sr.conn.WriteTo(b, addr)
-	if err != nil {
-		return nil, err
-	}
-
-	return s.bq.Read(message.MessageID)
+	return msg, nil
 }
 
 // Serve запускает сервер на указанном соединении (например, если нужно использовать свой UDP-сервер)
@@ -283,6 +306,8 @@ func (s *Server) listenLoop() {
 			continue
 		}
 
+		connStorage.SetUDP(senderAddr.String())
+
 		if n == 0 || n > MTU {
 			if n > MTU {
 				MetricMaxMTU.Inc()
@@ -295,13 +320,56 @@ func (s *Server) listenLoop() {
 			continue
 		}
 
-		if s.bq.Has(message.MessageID) {
-			s.bq.Write(message)
+		if v, ok := s.proxyCache.Get(message.GetTokenString() + senderAddr.String()); ok {
+			note := v.(*proxyNote)
+			s.proxyCache.SetDefault(message.GetTokenString()+senderAddr.String(), note)
+			note.tr.conn.WriteTo(readBuf[:n], note.addr)
 			continue
 		}
 
 		semaphore <- struct{}{}
 
-		go s.processLocalState(message, s.sr)
+		if message.GetOptionProxyURIasString() != "" {
+			go func() {
+				parsedURL, err := url.Parse(message.GetOptionProxyURIasString())
+				if err != nil {
+					fmt.Println("parse proxyUri error:", err)
+					return
+				}
+
+				message.RemoveOptions(OptionProxyScheme)
+				message.RemoveOptions(OptionProxyURI)
+
+				if err := s.sendTo(message, parsedURL.Host); err != nil {
+					fmt.Println("send error:", err)
+					return
+				}
+
+				s.proxyCache.SetDefault(message.GetTokenString()+parsedURL.Host, &proxyNote{addr: senderAddr.String(), tr: s.sr})
+				<-semaphore
+			}()
+
+			continue
+		}
+
+		go func() {
+			s.processLocalState(message, s.sr)
+			<-semaphore
+		}()
 	}
+}
+
+// GetConnectionType возвращает текущий тип соединения
+func (s *Server) GetConnectionType() uint8 {
+	return s.connectionType
+}
+
+// IsTCP возвращает true если сервер использует TCP
+func (s *Server) IsTCP() bool {
+	return s.connectionType&ConnectionTypeTCP != 0
+}
+
+// IsUDP возвращает true если сервер использует UDP
+func (s *Server) IsUDP() bool {
+	return s.connectionType&ConnectionTypeUDP != 0
 }
