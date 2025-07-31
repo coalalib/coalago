@@ -14,6 +14,7 @@ var (
 	ErrUnsupportedType = errors.New("unsupported type of message")
 	globalSessions     = newSessionStorageImpl(SESSIONS_POOL_EXPIRATION)
 	proxyIDSessions    = newProxySessionStorage(SESSIONS_POOL_EXPIRATION)
+	connStorage        = newConnectionStorage(SESSIONS_POOL_EXPIRATION)
 )
 
 type transport struct {
@@ -36,7 +37,6 @@ func (tr *transport) SetPrivateKey(pk []byte) {
 func (sr *transport) Send(message *CoAPMessage) (resp *CoAPMessage, err error) {
 	switch message.Type {
 	case CON:
-
 		if message.GetScheme() == COAPS_SCHEME {
 			proxyAddr := message.ProxyAddr
 			if len(proxyAddr) > 0 {
@@ -89,7 +89,7 @@ func (sr *transport) sendCON(message *CoAPMessage) (resp *CoAPMessage, err error
 		return
 	}
 
-	data, err := preparationSendingMessage(sr, message, sr.conn.RemoteAddr())
+	data, err := preparationSendingMessage(sr, message, sr.conn.RemoteAddr().String())
 	if err != nil {
 		return nil, err
 	}
@@ -160,7 +160,7 @@ func (sr *transport) sendACKTo(message *CoAPMessage, addr net.Addr) (err error) 
 }
 
 func (sr *transport) sendToSocket(message *CoAPMessage) error {
-	buf, err := preparationSendingMessage(sr, message, sr.conn.RemoteAddr())
+	buf, err := preparationSendingMessage(sr, message, sr.conn.RemoteAddr().String())
 	if err != nil {
 		return err
 	}
@@ -174,8 +174,7 @@ func (sr *transport) sendToSocket(message *CoAPMessage) error {
 }
 
 func (sr *transport) sendToSocketByAddress(message *CoAPMessage, addr net.Addr) error {
-
-	buf, err := preparationSendingMessage(sr, message, addr)
+	buf, err := preparationSendingMessage(sr, message, addr.String())
 	if err != nil {
 		return err
 	}
@@ -592,10 +591,10 @@ func (sr *transport) receiveARQBlock2(origMessage *CoAPMessage, inputMessage *Co
 	}
 }
 
-func preparationSendingMessage(tr *transport, message *CoAPMessage, addr net.Addr) ([]byte, error) {
+func preparationSendingMessage(tr *transport, message *CoAPMessage, addr string) ([]byte, error) {
 	secMessage := message.Clone(true)
 
-	if err := securityOutputLayer(tr, secMessage, addr); err != nil {
+	if err := securityOutputLayer(secMessage, tr.conn.LocalAddr().String(), addr); err != nil {
 		return nil, err
 	}
 
@@ -635,10 +634,9 @@ func preparationReceivingBuffer(tr *transport, data []byte, senderAddr net.Addr,
 
 	message.Sender = senderAddr
 
-	_, err = securityInputLayer(tr, message, proxyAddr)
-
-	if err != nil {
+	if err := securityInputLayer(tr, message, proxyAddr); err != nil {
 		return nil, err
 	}
+
 	return message, nil
 }

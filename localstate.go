@@ -41,7 +41,7 @@ func (ls *localState) processMessage(message *CoAPMessage) {
 	defer ls.mx.Unlock()
 
 	// Проверка безопасности
-	if ok, err := localStateSecurityInputLayer(ls.tr, message, ""); !ok || err != nil {
+	if err := localStateSecurityInputLayer(ls.tr, message, ""); err != nil {
 		return
 	}
 
@@ -56,6 +56,12 @@ func (ls *localState) processMessage(message *CoAPMessage) {
 		if err != nil {
 			return
 		}
+
+		if bq.Has(msg) {
+			bq.Write(msg)
+			return
+		}
+
 		requestOnReceive(ls.r.getResourceForPathAndMethod(msg.GetURIPath(), msg.GetMethod()), ls.tr, msg)
 	}
 	// Обновляем состояние (фрагментация/сборка блоков)
@@ -67,7 +73,7 @@ func MakeLocalStateFn(r Resourcer, tr *transport, _ func(*CoAPMessage, error)) L
 	return ls.processMessage
 }
 
-func localStateSecurityInputLayer(tr *transport, message *CoAPMessage, proxyAddr string) (bool, error) {
+func localStateSecurityInputLayer(tr *transport, message *CoAPMessage, proxyAddr string) error {
 	if len(proxyAddr) > 0 {
 		proxyID, ok := getProxyIDIfNeed(proxyAddr, tr.conn.LocalAddr().String())
 		if ok {
@@ -76,45 +82,10 @@ func localStateSecurityInputLayer(tr *transport, message *CoAPMessage, proxyAddr
 	}
 
 	if ok, err := receiveHandshake(tr, tr.privateKey, message, proxyAddr); !ok {
-		return false, err
+		return err
 	}
 
-	if message.GetScheme() == COAPS_SCHEME {
-		addressSession := message.Sender.String()
-		currentSession, ok := getSessionForAddress(tr, tr.conn.LocalAddr().String(), addressSession, proxyAddr)
-		if !ok {
-			responseMessage := NewCoAPMessageId(ACK, CoapCodeUnauthorized, message.MessageID)
-			responseMessage.AddOption(OptionSessionNotFound, 1)
-			responseMessage.Token = message.Token
-			tr.SendTo(responseMessage, message.Sender)
-			return false, ErrorClientSessionNotFound
-		}
-		err := decrypt(message, currentSession.AEAD)
-		if err != nil {
-			deleteSessionForAddress(tr.conn.LocalAddr().String(), addressSession, proxyAddr)
-			responseMessage := NewCoAPMessageId(ACK, CoapCodeUnauthorized, message.MessageID)
-			responseMessage.AddOption(OptionSessionExpired, 1)
-			responseMessage.Token = message.Token
-			tr.SendTo(responseMessage, message.Sender)
-			return false, ErrorClientSessionExpired
-		}
-		message.PeerPublicKey = currentSession.PeerPublicKey
-	}
-
-	sessionNotFound := message.GetOption(OptionSessionNotFound)
-	sessionExpired := message.GetOption(OptionSessionExpired)
-	if message.Code == CoapCodeUnauthorized {
-		if sessionNotFound != nil {
-			deleteSessionForAddress(tr.conn.LocalAddr().String(), message.Sender.String(), proxyAddr)
-			return false, ErrorSessionNotFound
-		}
-		if sessionExpired != nil {
-			deleteSessionForAddress(tr.conn.LocalAddr().String(), message.Sender.String(), proxyAddr)
-			return false, ErrorSessionExpired
-		}
-	}
-
-	return true, nil
+	return handleCoapsScheme(tr, message, proxyAddr)
 }
 
 func localStateMessageHandlerSelector(
