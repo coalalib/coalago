@@ -62,6 +62,8 @@ func (ls *localState) processMessage(message *CoAPMessage) {
 			return
 		}
 
+		StorageLocalStates.Delete(msg.Sender.String() + msg.GetTokenString())
+
 		requestOnReceive(ls.r.getResourceForPathAndMethod(msg.GetURIPath(), msg.GetMethod()), ls.tr, msg)
 	}
 	// Обновляем состояние (фрагментация/сборка блоков)
@@ -105,6 +107,11 @@ func localStateMessageHandlerSelector(
 				err error
 			)
 			ok, totalBlocks, buffer, message, err = localStateReceiveARQBlock1(sr, totalBlocks, buffer, message)
+
+			if err != nil {
+				fmt.Println("localStateMessageHandlerSelector error", err.Error())
+			}
+
 			if ok {
 				go respHandler(message, err)
 			}
@@ -130,9 +137,11 @@ func localStateReceiveARQBlock1(sr *transport, totalBlocks int, buf map[int][]by
 	if block == nil || inputMessage.Type != CON {
 		return false, totalBlocks, buf, inputMessage, nil
 	}
+
 	if !block.MoreBlocks {
 		totalBlocks = block.BlockNumber + 1
 	}
+
 	buf[block.BlockNumber] = inputMessage.Payload.Bytes()
 	if totalBlocks == len(buf) {
 		b := []byte{}

@@ -265,7 +265,6 @@ func (s *Server) ServeMessage(message *CoAPMessage) {
 func (s *Server) processLocalState(message *CoAPMessage, tr *transport) {
 	id := message.Sender.String() + message.GetTokenString()
 	fnIfase, _ := StorageLocalStates.LoadOrStore(id, MakeLocalStateFn(s, tr, nil))
-	defer StorageLocalStates.Delete(id)
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Printf("panic in handler: %v\n", r)
