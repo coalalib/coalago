@@ -208,6 +208,25 @@ func deserialize(data []byte) (*CoAPMessage, error) {
 	return msg, err
 }
 
+func SerializeByFlag(msg *CoAPMessage, TCP bool) ([]byte, error) {
+	if TCP {
+		return SerializeTCP(msg)
+	}
+	return Serialize(msg)
+}
+
+func SerializeTCP(msg *CoAPMessage) ([]byte, error) {
+	//fmt.Println("!!!!!!!!!!!!!!!!!!!!!! SerializeTCP1", msg.Sender)
+	buf, err := Serialize(msg)
+	if err != nil {
+		return nil, err
+	}
+
+	//fmt.Println("!!!!!!!!!!!!!!!!!!!!!! SerializeTCP", msg.Sender)
+
+	return encodeTCPFrame(buf, msg.Sender)
+}
+
 // Converts a message object to a byte array. Typically done prior to transmission
 func Serialize(msg *CoAPMessage) ([]byte, error) {
 	if option := msg.GetOption(OptionURIScheme); option != nil {
@@ -282,6 +301,7 @@ func (m *CoAPMessage) Clone(includePayload bool) *CoAPMessage {
 	cloneMessage.Options = m.Options
 	cloneMessage.ProxyAddr = m.ProxyAddr
 	cloneMessage.BreakConnectionOnPK = m.BreakConnectionOnPK
+	cloneMessage.Sender = m.Sender
 	if includePayload {
 		cloneMessage.Payload = m.Payload
 	}

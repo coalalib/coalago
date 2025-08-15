@@ -18,8 +18,9 @@ const (
 )
 
 type proxyNote struct {
-	addr string
-	tr   *transport
+	addr       string
+	tr         *transport
+	changeAddr bool
 }
 
 type Server struct {
@@ -44,6 +45,23 @@ func NewServer(opts ...Opt) *Server {
 	}
 }
 
+var externalAddr = func() string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return ""
+	}
+
+	for _, addr := range addrs {
+		if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+			if ipnet.IP.To4() != nil {
+				return ipnet.IP.String()
+			}
+		}
+	}
+
+	return ""
+}()
+
 func (s *Server) ListenTCP(addr string) error {
 	s.addr = addr
 	s.connectionType |= ConnectionTypeTCP // устанавливаем бит TCP = 1
@@ -61,7 +79,7 @@ func (s *Server) Listen(addr string) error {
 		return err
 	}
 
-	s.sr = newtransport(conn)
+	s.sr = newtransport(conn, false)
 	s.sr.privateKey = s.privatekey
 	fmt.Printf(
 		"COALA server start ADDR: %s, WS: %d, MinWS: %d, MaxWS: %d, Retransmit:%d, timeWait:%d, poolExpiration:%d\n",
@@ -97,11 +115,11 @@ func (s *Server) HandleTCPConn(conn net.Conn) {
 		connStorage.DeleteTCP(conn.RemoteAddr().String())
 	}()
 
-	tcpTr := newtransport(&tcpConnection{conn: conn.(*net.TCPConn)})
+	tcpTr := newtransport(&tcpConnection{conn: conn.(*net.TCPConn)}, true)
 
-	buf := make([]byte, 65536)
+	buf := make([]byte, 1500)
 	for {
-		n, err := ReadTcpFrame(conn, buf)
+		wrp, err := ReadTCPFrame(conn, buf)
 		if err != nil {
 			if err != io.EOF {
 				fmt.Println("readFrame error:", err)
@@ -109,44 +127,70 @@ func (s *Server) HandleTCPConn(conn net.Conn) {
 			return
 		}
 
+		// fmt.Println("!!!!!!!!!!!!!!!!!!!!!! readed", wrp.ip, wrp.port, wrp.size)
+
 		connStorage.SetTCP(conn.RemoteAddr().String(), conn)
 
-		msg, err := Deserialize(buf[:n])
+		msg, err := Deserialize(buf[:wrp.size])
 		if err != nil {
 			fmt.Println("deserialize error:", err)
 			continue
 		}
+		fmt.Println("????????????????????????? readed ", wrp.ip, wrp.port, msg.ToReadableString())
 
 		msg.Sender = conn.RemoteAddr()
-		proxyUri := msg.GetOptionProxyURIasString()
-		if proxyUri == "" {
+
+		if tcpTr.externalAddr.String() == fmt.Sprintf("%s:%d", wrp.ip, wrp.port) && msg.GetOptionProxyURIasString() == "" {
 			if v, ok := s.proxyCache.Get(msg.GetTokenString() + conn.RemoteAddr().String()); ok {
 				note := v.(*proxyNote)
 				s.proxyCache.SetDefault(msg.GetTokenString()+conn.RemoteAddr().String(), note)
-				note.tr.conn.WriteTo(buf[:n], note.addr)
+
+				msg.Sender = note.tr.externalAddr
+
+				b, err := SerializeByFlag(msg, note.tr.tcp)
+				if err != nil {
+					fmt.Println("serialize error:", err)
+					continue
+				}
+
+				fmt.Println("KKKKKKKKKKKKKK2222222222222 readed ", wrp.ip, wrp.port, msg.ToReadableString())
+				note.tr.conn.WriteTo(b, note.addr)
 				continue
 			}
 
+			fmt.Println("KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK readed ", wrp.ip, wrp.port, msg.ToReadableString())
 			go s.processLocalState(msg, tcpTr)
 			continue
 		}
 
 		go func() {
-			parsedURL, err := url.Parse(proxyUri)
-			if err != nil {
-				fmt.Println("parse proxyUri error:", err)
+			fmt.Println("PPPPPPPPPPPPPPPPPPPPPPPPPPPPPP readed ", wrp.ip, wrp.port, msg.ToReadableString())
+			host := fmt.Sprintf("%s:%d", wrp.ip, wrp.port)
+
+			if wrp.ip.String() == "5.189.11.67" {
+				fmt.Println("to router dropped")
 				return
+			}
+
+			if msg.GetOptionProxyURIasString() != "" {
+				parsedURL, err := url.Parse(msg.GetOptionProxyURIasString())
+				if err != nil {
+					fmt.Println("parse proxyUri error:", err)
+					return
+				}
+
+				host = parsedURL.Host
 			}
 
 			msg.RemoveOptions(OptionProxyScheme)
 			msg.RemoveOptions(OptionProxyURI)
 
-			if err := s.sendTo(msg, parsedURL.Host); err != nil {
+			if err := s.sendTo(msg, host); err != nil {
 				fmt.Println("send error:", err)
 				return
 			}
 
-			s.proxyCache.SetDefault(msg.GetTokenString()+parsedURL.Host, &proxyNote{addr: msg.Sender.String(), tr: tcpTr})
+			s.proxyCache.SetDefault(msg.GetTokenString()+host, &proxyNote{addr: msg.Sender.String(), tr: tcpTr})
 		}()
 	}
 }
@@ -172,7 +216,7 @@ func (s *Server) Refresh() error {
 		return err
 	}
 
-	s.sr = newtransport(conn)
+	s.sr = newtransport(conn, false)
 	s.sr.privateKey = s.privatekey
 
 	go s.listenLoop() // перезапускаем цикл прослушивания в горутине
@@ -213,14 +257,18 @@ func (s *Server) AddUDP(addr string) {
 }
 
 func (s *Server) sendTo(message *CoAPMessage, addr string) error {
-	b, err := Serialize(message)
-	if err != nil {
-		return err
-	}
-
+	tcp := false
 	tr := s.sr
 	if conn, ok := connStorage.GetTCP(addr); ok {
-		tr = newtransport(&tcpConnection{conn: conn.(*net.TCPConn)})
+		tr = newtransport(&tcpConnection{conn: conn.(*net.TCPConn)}, true)
+		tcp = true
+	}
+
+	fmt.Println("!!!!!!!!!!!!!!!!!!!!!! sendTo", addr, message.ToReadableString(), tcp)
+
+	b, err := SerializeByFlag(message, tcp)
+	if err != nil {
+		return err
 	}
 
 	_, err = tr.conn.WriteTo(b, addr)
@@ -252,7 +300,7 @@ func (s *Server) Send(message *CoAPMessage, addr string) (*CoAPMessage, error) {
 // нужно для прокси сервиса
 func (s *Server) Serve(conn *net.UDPConn) {
 	c := &connection{conn: conn}
-	s.sr = newtransport(c)
+	s.sr = newtransport(c, false)
 	s.sr.privateKey = s.privatekey
 }
 
@@ -323,7 +371,16 @@ func (s *Server) listenLoop() {
 		if v, ok := s.proxyCache.Get(message.GetTokenString() + senderAddr.String()); ok {
 			note := v.(*proxyNote)
 			s.proxyCache.SetDefault(message.GetTokenString()+senderAddr.String(), note)
-			note.tr.conn.WriteTo(readBuf[:n], note.addr)
+
+			fmt.Println("!!!!!!!!!!!!!!!!!!!!!! sendTo", note.addr, message.ToReadableString())
+
+			b, err := SerializeByFlag(message, note.tr.tcp)
+			if err != nil {
+				fmt.Println("serialize error:", err)
+				continue
+			}
+
+			note.tr.conn.WriteTo(b, note.addr)
 			continue
 		}
 

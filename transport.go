@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -21,11 +22,23 @@ type transport struct {
 	conn           Transport
 	block2channels sync.Map
 	privateKey     []byte
+	tcp            bool
+	externalAddr   net.Addr
 }
 
-func newtransport(conn Transport) *transport {
+func newtransport(conn Transport, tcp bool) *transport {
 	sr := new(transport)
 	sr.conn = conn
+	sr.tcp = tcp
+	sr.externalAddr = sr.conn.LocalAddr()
+
+	if len(externalAddr) > 0 {
+		ip, port, _ := net.SplitHostPort(sr.conn.LocalAddr().String())
+		if ip == "0.0.0.0" {
+			portInt, _ := strconv.Atoi(port)
+			sr.externalAddr = &net.TCPAddr{IP: net.ParseIP(externalAddr), Port: portInt}
+		}
+	}
 
 	return sr
 }
@@ -598,7 +611,11 @@ func preparationSendingMessage(tr *transport, message *CoAPMessage, addr string)
 		return nil, err
 	}
 
-	buf, err := Serialize(secMessage)
+	if secMessage.Sender == nil {
+		secMessage.Sender = tr.externalAddr
+	}
+
+	buf, err := SerializeByFlag(secMessage, tr.tcp)
 	if err != nil {
 		return nil, err
 	}
@@ -634,7 +651,7 @@ func preparationReceivingBuffer(tr *transport, data []byte, senderAddr net.Addr,
 
 	message.Sender = senderAddr
 
-	if err := securityInputLayer(tr, message, proxyAddr); err != nil {
+	if _, err := securityInputLayer(tr, message, proxyAddr); err != nil {
 		return nil, err
 	}
 

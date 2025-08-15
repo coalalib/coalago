@@ -3,7 +3,6 @@ package main
 import (
 	"flag"
 	"fmt"
-	"net"
 	"os"
 	"sync"
 
@@ -70,21 +69,4 @@ func main() {
 	}()
 
 	panic(server.ListenTCP(":5858"))
-}
-
-func sendCommandToDevice(deviceID string) {
-	val, ok := deviceConns.Load(deviceID)
-	if !ok {
-		fmt.Println("Device not found")
-		return
-	}
-	conn := val.(net.Conn)
-	coapMsg := coalago.NewCoAPMessage(coalago.CON, coalago.GET)
-
-	coapMsg.SetURIPath("/status")
-	data, _ := coalago.Serialize(coapMsg)
-	_, err := coalago.WriteTcpFrame(conn, data)
-	if err != nil {
-		fmt.Println("writeFrame error:", err)
-	}
 }

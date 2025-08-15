@@ -39,6 +39,7 @@ func NewTCPClient(opts ...Opt) *Client {
 	return &Client{
 		privateKey: options.privatekey,
 		pool:       newConnpool(true),
+		useTCP:     true,
 	}
 }
 
@@ -52,7 +53,7 @@ func (c *Client) Send(message *CoAPMessage, addr string, options ...*CoAPMessage
 
 	defer conn.Close()
 
-	sr := newtransport(conn)
+	sr := newtransport(conn, c.useTCP)
 	sr.privateKey = c.privateKey
 
 	resp, err := sr.Send(message)
@@ -117,7 +118,7 @@ func (c *Client) sendCON(msg *CoAPMessage) (*CoAPMessage, error) {
 	}
 	defer conn.Close()
 
-	sr := newtransport(conn)
+	sr := newtransport(conn, c.useTCP)
 	sr.privateKey = c.privateKey
 	return sr.Send(msg)
 }

@@ -8,6 +8,13 @@ func WithPrivateKey(privatekey []byte) Opt {
 	}
 }
 
+func WithExternalAddr(externalAddr string) Opt {
+	return func(opts *coalaopts) {
+		opts.externalAddr = externalAddr
+	}
+}
+
 type coalaopts struct {
-	privatekey []byte
+	privatekey   []byte
+	externalAddr string
 }

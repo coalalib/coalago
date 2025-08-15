@@ -41,7 +41,8 @@ func (ls *localState) processMessage(message *CoAPMessage) {
 	defer ls.mx.Unlock()
 
 	// Проверка безопасности
-	if err := localStateSecurityInputLayer(ls.tr, message, ""); err != nil {
+	if ok, err := localStateSecurityInputLayer(ls.tr, message, ""); !ok || err != nil {
+		fmt.Println("localStateSecurityInputLayer error", err.Error())
 		return
 	}
 
@@ -75,7 +76,7 @@ func MakeLocalStateFn(r Resourcer, tr *transport, _ func(*CoAPMessage, error)) L
 	return ls.processMessage
 }
 
-func localStateSecurityInputLayer(tr *transport, message *CoAPMessage, proxyAddr string) error {
+func localStateSecurityInputLayer(tr *transport, message *CoAPMessage, proxyAddr string) (bool, error) {
 	if len(proxyAddr) > 0 {
 		proxyID, ok := getProxyIDIfNeed(proxyAddr, tr.conn.LocalAddr().String())
 		if ok {
@@ -84,7 +85,7 @@ func localStateSecurityInputLayer(tr *transport, message *CoAPMessage, proxyAddr
 	}
 
 	if ok, err := receiveHandshake(tr, tr.privateKey, message, proxyAddr); !ok {
-		return err
+		return false, err
 	}
 
 	return handleCoapsScheme(tr, message, proxyAddr)

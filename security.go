@@ -75,7 +75,7 @@ func deleteSessionForAddress(senderAddr, receiverAddr, proxyAddr string) {
 	globalSessions.Delete(senderAddr, receiverAddr, proxyAddr)
 }
 
-func securityInputLayer(tr *transport, message *CoAPMessage, proxyAddr string) error {
+func securityInputLayer(tr *transport, message *CoAPMessage, proxyAddr string) (bool, error) {
 	if len(proxyAddr) > 0 {
 		proxyID, ok := getProxyIDIfNeed(proxyAddr, tr.conn.LocalAddr().String())
 		if ok {
@@ -84,13 +84,13 @@ func securityInputLayer(tr *transport, message *CoAPMessage, proxyAddr string) e
 	}
 
 	if ok, err := receiveHandshake(tr, tr.privateKey, message, proxyAddr); !ok {
-		return err
+		return false, err
 	}
 
 	return handleCoapsScheme(tr, message, proxyAddr)
 }
 
-func handleCoapsScheme(tr *transport, message *CoAPMessage, proxyAddr string) error {
+func handleCoapsScheme(tr *transport, message *CoAPMessage, proxyAddr string) (bool, error) {
 	// Check if the message has coaps:// scheme and requires a new Session
 	if message.GetScheme() == COAPS_SCHEME {
 
@@ -105,7 +105,7 @@ func handleCoapsScheme(tr *transport, message *CoAPMessage, proxyAddr string) er
 				fmt.Println("sendTo error:", err.Error())
 			}
 
-			return ErrorClientSessionNotFound
+			return false, ErrorClientSessionNotFound
 		}
 
 		// Decrypt message payload
@@ -119,7 +119,7 @@ func handleCoapsScheme(tr *transport, message *CoAPMessage, proxyAddr string) er
 				fmt.Println("sendTo error:", err.Error())
 			}
 
-			return ErrorClientSessionExpired
+			return false, ErrorClientSessionExpired
 		}
 
 		message.PeerPublicKey = currentSession.PeerPublicKey
@@ -131,15 +131,15 @@ func handleCoapsScheme(tr *transport, message *CoAPMessage, proxyAddr string) er
 	if message.Code == CoapCodeUnauthorized {
 		if sessionNotFound != nil {
 			deleteSessionForAddress(tr.conn.LocalAddr().String(), message.Sender.String(), proxyAddr)
-			return ErrorSessionNotFound
+			return false, ErrorSessionNotFound
 		}
 		if sessionExpired != nil {
 			deleteSessionForAddress(tr.conn.LocalAddr().String(), message.Sender.String(), proxyAddr)
-			return ErrorSessionExpired
+			return false, ErrorSessionExpired
 		}
 	}
 
-	return nil
+	return true, nil
 }
 
 func receiveHandshake(tr *transport, privatekey []byte, message *CoAPMessage, proxyAddr string) (isContinue bool, err error) {
@@ -151,10 +151,14 @@ func receiveHandshake(tr *transport, privatekey []byte, message *CoAPMessage, pr
 		return true, nil
 	}
 
+	fmt.Println("HHHHHHHHHHHHHHHHHHHHHHHHHHH receiveHandshake", message.ToReadableString())
+
 	value := option.IntValue()
 	if value != CoapHandshakeTypeClientSignature && value != CoapHandshakeTypeClientHello {
 		return false, nil
 	}
+
+	fmt.Println("HHHHHHHHHHHHHHHHHHHHHHHHHHH2222 receiveHandshake", message.ToReadableString())
 
 	peerSession, ok := getSessionForAddress(tr.conn.LocalAddr().String(), message.Sender.String(), proxyAddr)
 	if !ok {
@@ -162,12 +166,16 @@ func receiveHandshake(tr *transport, privatekey []byte, message *CoAPMessage, pr
 			return false, ErrorHandshake
 		}
 	}
+
 	if value == CoapHandshakeTypeClientHello && message.Payload != nil {
 		peerSession.PeerPublicKey = message.Payload.Bytes()
 
+		fmt.Println("HHHHHHHHHHHHHHHHHHHHHHHHHHH3333 receiveHandshake", message.ToReadableString())
 		if err := incomingHandshake(tr, peerSession.Curve.GetPublicKey(), message); err != nil {
 			return false, ErrorHandshake
 		}
+		fmt.Println("HHHHHHHHHHHHHHHHHHHHHHHHHHH4444 receiveHandshake", message.ToReadableString())
+
 		if signature, err := peerSession.GetSignature(); err == nil {
 			if err = peerSession.PeerVerify(signature); err != nil {
 				return false, ErrorHandshake
@@ -179,6 +187,7 @@ func receiveHandshake(tr *transport, privatekey []byte, message *CoAPMessage, pr
 		MetricSuccessfulHandhshakes.Inc()
 
 		peerSession.UpdatedAt = int(time.Now().Unix())
+		fmt.Println("HHHHHHHHHHHHHHHHHHHHHHHHHHH5555 receiveHandshake", message.ToReadableString(), tr.conn.LocalAddr().String(), message.Sender.String(), proxyAddr)
 		setSessionForAddress(peerSession, tr.conn.LocalAddr().String(), message.Sender.String(), proxyAddr)
 		return false, nil
 	}
@@ -275,6 +284,7 @@ func newServerHelloMessage(origMessage *CoAPMessage, publicKey []byte) *CoAPMess
 
 func incomingHandshake(tr *transport, publicKey []byte, origMessage *CoAPMessage) error {
 	message := newServerHelloMessage(origMessage, publicKey)
+	fmt.Println("!!!!!!!!!!!!!!!!!!!!!! incomingHandshake", message.ToReadableString())
 	if _, err := tr.SendTo(message, origMessage.Sender); err != nil {
 		return err
 	}

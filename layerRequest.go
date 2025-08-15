@@ -1,5 +1,7 @@
 package coalago
 
+import "fmt"
+
 func requestOnReceive(resource *CoAPResource, sr *transport, message *CoAPMessage) bool {
 	if message.Code > 4 {
 		return true
@@ -95,6 +97,8 @@ func noResource(sr *transport, message *CoAPMessage) bool {
 	}
 	responseMessage.CloneOptions(message, OptionBlock1, OptionBlock2, OptionProxySecurityID)
 	responseMessage.Recipient = message.Sender
+
+	fmt.Println("!!!!!!!!!!!!!!!!!!!!!! noResource", message.ToReadableString())
 
 	_, err := sr.SendTo(responseMessage, message.Sender)
 	return err != nil

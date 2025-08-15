@@ -2,8 +2,10 @@ package coalago
 
 import (
 	"encoding/binary"
+	"fmt"
 	"io"
 	"net"
+	"strconv"
 	"time"
 )
 
@@ -24,22 +26,23 @@ func (c *tcpConnection) LocalAddr() net.Addr {
 }
 
 func (c *tcpConnection) Read(buff []byte) (int, error) {
-	return ReadTcpFrame(c.conn, buff)
+	wrp, err := ReadTCPFrame(c.conn, buff)
+	return int(wrp.size), err
 }
 
 // Listen для TCP просто Read (нет адреса отправителя)
 func (c *tcpConnection) Listen(buff []byte) (int, net.Addr, error) {
-	n, err := ReadTcpFrame(c.conn, buff)
-	return n, c.conn.RemoteAddr(), err
+	wrp, err := ReadTCPFrame(c.conn, buff)
+	return int(wrp.size), c.conn.RemoteAddr(), err
 }
 
 func (c *tcpConnection) Write(buf []byte) (int, error) {
-	return WriteTcpFrame(c.conn, buf)
+	return c.conn.Write(buf)
 }
 
 // WriteTo для TCP игнорирует addr (point-to-point)
 func (c *tcpConnection) WriteTo(buf []byte, _ string) (int, error) {
-	return WriteTcpFrame(c.conn, buf)
+	return c.conn.Write(buf)
 }
 
 func (c *tcpConnection) SetReadDeadline() {
@@ -55,86 +58,84 @@ func (c *tcpConnection) SetUDPRecvBuf(size int) int {
 	return size
 }
 
-// --- RFC 8323 framing helpers ---
-func encodeLength(length int) []byte {
-	switch {
-	case length <= 12:
-		return []byte{byte(length)}
-	case length <= 255+13:
-		return []byte{13, byte(length - 13)}
-	case length <= 65535+269:
-		b := make([]byte, 3)
-		b[0] = 14
-		binary.BigEndian.PutUint16(b[1:], uint16(length-269))
-		return b
-	default:
-		b := make([]byte, 5)
-		b[0] = 15
-		binary.BigEndian.PutUint32(b[1:], uint32(length-65805))
-		return b
-	}
+type tcpWrapper struct {
+	ip   net.IP
+	port uint16
+	size uint16
 }
 
-func decodeLength(r io.Reader) (int, error) {
+func ReadTCPFrame(r io.Reader, buff []byte) (tcpWrapper, error) {
+	wrp := tcpWrapper{}
 	var first [1]byte
 	_, err := io.ReadFull(r, first[:])
 	if err != nil {
-		return 0, err
+		return wrp, err
 	}
 
-	length := int(first[0] & 0x0F) // Получаем 4-битное поле Length
-
-	switch length {
-	case 13:
-		var b [1]byte
-		_, err := io.ReadFull(r, b[:])
-		if err != nil {
-			return 0, err
-		}
-		return int(b[0]) + 13, nil
-	case 14:
-		var b [2]byte
-		_, err := io.ReadFull(r, b[:])
-		if err != nil {
-			return 0, err
-		}
-		return int(binary.BigEndian.Uint16(b[:])) + 269, nil
-	case 15:
-		var b [4]byte
-		_, err := io.ReadFull(r, b[:])
-		if err != nil {
-			return 0, err
-		}
-		return int(binary.BigEndian.Uint32(b[:])) + 65805, nil
-	default:
-		return length, nil
+	//fmt.Println("!!!!!!!!!!!!!!!!!!!!!!first")
+	if first[0] != 0x4D {
+		return wrp, fmt.Errorf("invalid frame")
 	}
+
+	var meta [4 + 2 + 2]byte
+	_, err = io.ReadFull(r, meta[:])
+	if err != nil {
+		return wrp, err
+	}
+
+	//fmt.Println("!!!!!!!!!!!!!!!!!!!!!! meta")
+	wrp.ip = net.IP(meta[:4])
+	wrp.port = binary.BigEndian.Uint16(meta[4:6])
+	wrp.size = binary.BigEndian.Uint16(meta[6:])
+
+	if int(wrp.size) > len(buff) {
+		return wrp, io.ErrShortBuffer
+	}
+
+	//fmt.Println("!!!!!!!!!!!!!!!!!!!!!! meta", wrp.ip, wrp.port, wrp.size, len(buff))
+
+	_, err = io.ReadFull(r, buff[:wrp.size])
+	if err != nil {
+		return wrp, err
+	}
+
+	return wrp, nil
 }
 
-func ReadTcpFrame(r io.Reader, buff []byte) (int, error) {
-	length, err := decodeLength(r)
+func encodeTCPFrame(data []byte, sender net.Addr) ([]byte, error) {
+	ip, port, err := getIpPort(sender)
 	if err != nil {
-		return 0, err
-	}
-	if length > len(buff) {
-		return 0, io.ErrShortBuffer
+		return nil, err
 	}
 
-	_, err = io.ReadFull(r, buff[:length])
-	if err != nil {
-		return 0, err
-	}
-	return length, nil
+	//fmt.Println("!!!!!!!!!!!!!!!!!!!!!! encodeTCPFrame", ip, port)
+
+	buf := make([]byte, 1+4+2+2)
+	buf[0] = 0x4D
+	copy(buf[1:5], ip.To4())
+	binary.BigEndian.PutUint16(buf[5:7], uint16(port))
+	binary.BigEndian.PutUint16(buf[7:9], uint16(len(data)))
+	//fmt.Println("!!!!!!!!!!!!!!!!!!!!!! encodeTCPFrame", len(data), len(buf), len(buf)+len(data))
+	//fmt.Println("!!!!!!!!!!!!!!!!!!!!!! encodeTCPFramebuf", buf[1:5])
+	return append(buf, data...), nil
 }
 
-func WriteTcpFrame(w io.Writer, data []byte) (int, error) {
-	prefix := encodeLength(len(data))
-	n1, err := w.Write(prefix)
-	if err != nil {
-		return n1, err
+func getIpPort(sender net.Addr) (net.IP, uint16, error) {
+	if sender == nil {
+		return nil, 0, nil
 	}
-	n2, err := w.Write(data)
-	return n1 + n2, err
+
+	ip, port, err := net.SplitHostPort(sender.String())
+	if err != nil {
+		return nil, 0, err
+	}
+
+	portInt, err := strconv.Atoi(port)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return net.ParseIP(ip), uint16(portInt), nil
 }
 
 // TCP dialer
@@ -185,7 +186,13 @@ func (l *tcpListenerWrapper) Read(buff []byte) (int, error) {
 		return 0, err
 	}
 	defer conn.Close()
-	return ReadTcpFrame(conn, buff)
+
+	wrp, err := ReadTCPFrame(conn, buff)
+	if err != nil {
+		return 0, err
+	}
+
+	return int(wrp.size), nil
 }
 
 func (l *tcpListenerWrapper) Listen(buff []byte) (int, net.Addr, error) {
@@ -194,8 +201,12 @@ func (l *tcpListenerWrapper) Listen(buff []byte) (int, net.Addr, error) {
 		return 0, nil, err
 	}
 
-	n, err := ReadTcpFrame(conn, buff)
-	return n, conn.RemoteAddr(), err
+	wrp, err := ReadTCPFrame(conn, buff)
+	if err != nil {
+		return 0, nil, err
+	}
+
+	return int(wrp.size), conn.RemoteAddr(), nil
 }
 
 func (l *tcpListenerWrapper) Write(buf []byte) (int, error) {
