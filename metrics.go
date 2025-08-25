@@ -12,6 +12,7 @@ var (
 	MetricSessionsRate,
 	MetricSessionsCount,
 	MetricSuccessfulHandhshakes,
+	MetrixProxySessions,
 	MetricMaxMTU counterImpl
 )
 
