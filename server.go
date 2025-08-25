@@ -147,7 +147,8 @@ func (s *Server) HandleTCPConn(conn net.Conn) {
 			}
 
 			s.proxyCache.SetDefault(msg.GetTokenString()+parsedURL.Host, &proxyNote{addr: msg.Sender.String(), tr: tcpTr})
-			MetrixProxySessions.Set(int64(s.proxyCache.ItemCount()))
+			MetricProxySessions.Set(int64(s.proxyCache.ItemCount()))
+			MetricProxySessionsRate.Inc()
 		}()
 	}
 }
@@ -347,7 +348,8 @@ func (s *Server) listenLoop() {
 				}
 
 				s.proxyCache.SetDefault(message.GetTokenString()+parsedURL.Host, &proxyNote{addr: senderAddr.String(), tr: s.sr})
-				MetrixProxySessions.Set(int64(s.proxyCache.ItemCount()))
+				MetricProxySessions.Set(int64(s.proxyCache.ItemCount()))
+				MetricProxySessionsRate.Inc()
 				<-semaphore
 			}()
 
