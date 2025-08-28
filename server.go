@@ -210,10 +210,6 @@ func (s *Server) GetPrivateKey() []byte {
 	return s.privatekey
 }
 
-func (s *Server) AddUDP(addr string) {
-	connStorage.SetUDP(addr)
-}
-
 func (s *Server) sendTo(message *CoAPMessage, addr string) error {
 	b, err := Serialize(message)
 	if err != nil {
@@ -307,8 +303,6 @@ func (s *Server) listenLoop() {
 			fmt.Printf("read error: %v\n", err)
 			continue
 		}
-
-		connStorage.SetUDP(senderAddr.String())
 
 		if n == 0 || n > MTU {
 			if n > MTU {

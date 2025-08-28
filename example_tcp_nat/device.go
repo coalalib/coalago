@@ -95,7 +95,6 @@ func deviceUDP(addr string) {
 
 	msg := coalago.NewCoAPMessage(coalago.CON, coalago.GET)
 	msg.SetURIPath("/ping")
-	server.AddUDP(addr + ":5858")
 
 	time.Sleep(time.Second * 2)
 
