@@ -23,7 +23,6 @@ type localState struct {
 	downloadStarted time.Time
 	r               Resourcer
 	tr              *transport
-	closeCallback   func()
 }
 
 func newLocalState(r Resourcer, tr *transport) *localState {
@@ -41,7 +40,7 @@ func (ls *localState) processMessage(message *CoAPMessage) {
 	defer ls.mx.Unlock()
 
 	// Проверка безопасности
-	if err := localStateSecurityInputLayer(ls.tr, message, ""); err != nil {
+	if ok, err := localStateSecurityInputLayer(ls.tr, message, ""); !ok || err != nil {
 		return
 	}
 
@@ -75,7 +74,7 @@ func MakeLocalStateFn(r Resourcer, tr *transport, _ func(*CoAPMessage, error)) L
 	return ls.processMessage
 }
 
-func localStateSecurityInputLayer(tr *transport, message *CoAPMessage, proxyAddr string) error {
+func localStateSecurityInputLayer(tr *transport, message *CoAPMessage, proxyAddr string) (bool, error) {
 	if len(proxyAddr) > 0 {
 		proxyID, ok := getProxyIDIfNeed(proxyAddr, tr.conn.LocalAddr().String())
 		if ok {
@@ -84,10 +83,14 @@ func localStateSecurityInputLayer(tr *transport, message *CoAPMessage, proxyAddr
 	}
 
 	if ok, err := receiveHandshake(tr, tr.privateKey, message, proxyAddr); !ok {
-		return err
+		return false, err
 	}
 
-	return handleCoapsScheme(tr, message, proxyAddr)
+	if err := handleCoapsScheme(tr, message, proxyAddr); err != nil {
+		return false, err
+	}
+
+	return true, nil
 }
 
 func localStateMessageHandlerSelector(
