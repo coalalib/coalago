@@ -56,12 +56,12 @@ func (ls *localState) processMessage(message *CoAPMessage) {
 			return
 		}
 
+		StorageLocalStates.Delete(msg.Sender.String() + msg.GetTokenString())
+
 		if bq.Has(msg) {
 			bq.Write(msg)
 			return
 		}
-
-		StorageLocalStates.Delete(msg.Sender.String() + msg.GetTokenString())
 
 		requestOnReceive(ls.r.getResourceForPathAndMethod(msg.GetURIPath(), msg.GetMethod()), ls.tr, msg)
 	}
