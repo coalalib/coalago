@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-var StorageLocalStates sync.Map // Используем sync.Map с LoadOrStore
+var StorageLocalStates = newShardedCache(3 * time.Minute)
 
 type LocalStateFn func(*CoAPMessage)
 

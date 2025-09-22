@@ -71,6 +71,25 @@ func (c *shardedCache) ItemCount() int {
 	return total
 }
 
+func (c *shardedCache) LoadOrStore(key string, value interface{}) (interface{}, bool) {
+	sh := c.shard(key)
+	item := cacheItem{value: value, expiresAt: time.Now().Add(c.ttl)}
+
+	// Пытаемся загрузить существующий элемент
+	if v, ok := sh.Load(key); ok {
+		existingItem := v.(cacheItem)
+		if time.Now().Before(existingItem.expiresAt) {
+			return existingItem.value, true
+		}
+		// Элемент истек, удаляем его
+		sh.Delete(key)
+	}
+
+	// Сохраняем новый элемент
+	sh.Store(key, item)
+	return value, false
+}
+
 func (c *shardedCache) cleanupLoop() {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
