@@ -23,16 +23,19 @@ func (b *backwardStorage) Has(msg *CoAPMessage) bool {
 }
 
 func (b *backwardStorage) Write(msg *CoAPMessage) {
-	b.mx.Lock()
-	defer b.mx.Unlock()
+	b.mx.RLock()
 	ch, ok := b.m[msg.GetTokenString()+msg.Sender.String()]
+	b.mx.RUnlock()
+
 	if !ok {
 		return
 	}
 
+	// Проверяем, что канал не закрыт
 	select {
 	case ch <- msg:
 	default:
+		// Канал может быть закрыт или полон
 	}
 }
 
@@ -54,5 +57,31 @@ func (b *backwardStorage) Read(id string) (*CoAPMessage, error) {
 		return msg, nil
 	case <-time.After(time.Second * 5):
 		return nil, errors.New("timeout")
+	}
+}
+
+func (b *backwardStorage) Get(id string) chan *CoAPMessage {
+	b.mx.Lock()
+	defer b.mx.Unlock()
+
+	ch, ok := b.m[id]
+	if !ok {
+		ch = make(chan *CoAPMessage)
+		b.m[id] = ch
+	}
+	return ch
+}
+
+func (b *backwardStorage) Delete(id string) {
+	b.mx.Lock()
+	defer b.mx.Unlock()
+	if ch, ok := b.m[id]; ok {
+		select {
+		case <-ch:
+			// Канал уже закрыт
+		default:
+			close(ch)
+		}
+		delete(b.m, id)
 	}
 }

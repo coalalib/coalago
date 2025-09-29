@@ -1,6 +1,7 @@
 package coalago
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -229,21 +230,54 @@ func (s *Server) sendTo(message *CoAPMessage, addr string) error {
 	return nil
 }
 
+type sendOpts struct {
+	retries int
+}
+
+type SendOptions func(*sendOpts)
+
+func WithRetries(retries int) SendOptions {
+	return func(opts *sendOpts) {
+		opts.retries = retries
+	}
+}
+
 // Send отправляет сообщение на указанный адрес и возвращает ответ
 // используется вместо клиента, когда нужно отправить запрос с занятого сервером порта
-func (s *Server) Send(message *CoAPMessage, addr string) (*CoAPMessage, error) {
+func (s *Server) Send(message *CoAPMessage, addr string, opts ...SendOptions) (*CoAPMessage, error) {
+	o := &sendOpts{
+		retries: 0,
+	}
+
+	for _, opt := range opts {
+		opt(o)
+	}
+
+	if message.Timeout == 0 {
+		message.Timeout = time.Second
+	}
+
 	if err := s.sendTo(message, addr); err != nil {
 		return nil, err
 	}
 
 	resolved, _ := net.ResolveUDPAddr("udp", addr)
+	ch := bq.Get(message.GetTokenString() + resolved.String())
 
-	msg, err := bq.Read(message.GetTokenString() + resolved.String())
-	if err != nil {
-		return nil, err
+	defer bq.Delete(message.GetTokenString() + resolved.String())
+
+	for range o.retries + 1 {
+		select {
+		case msg := <-ch:
+			return msg, nil
+		case <-time.After(message.Timeout):
+			if err := s.sendTo(message, addr); err != nil {
+				return nil, err
+			}
+		}
 	}
 
-	return msg, nil
+	return nil, errors.New("timeout")
 }
 
 // Serve запускает сервер на указанном соединении (например, если нужно использовать свой UDP-сервер)
