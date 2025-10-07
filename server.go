@@ -6,10 +6,12 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/coalalib/coalago/session"
 	"github.com/patrickmn/go-cache"
 )
 
@@ -128,6 +130,12 @@ func (s *Server) HandleTCPConn(conn net.Conn) {
 				continue
 			}
 
+			option := msg.GetOption(OptionHandshakeType)
+			if option != nil && option.IntValue() == CoapHandshakeTypePeerHello && bq.Has(msg) {
+				bq.Write(msg)
+				continue
+			}
+
 			go s.processLocalState(msg, tcpTr)
 			continue
 		}
@@ -212,17 +220,23 @@ func (s *Server) GetPrivateKey() []byte {
 }
 
 func (s *Server) sendTo(message *CoAPMessage, addr string) error {
-	b, err := Serialize(message)
-	if err != nil {
-		return err
-	}
-
 	tr := s.sr
 	if conn, ok := connStorage.GetTCP(addr); ok {
 		tr = newtransport(&tcpConnection{conn: conn.(*net.TCPConn)})
 	}
 
-	_, err = tr.conn.WriteTo(b, addr)
+	secMessage := message.Clone(true)
+
+	if err := securityOutputLayer(secMessage, tr.conn.LocalAddr().String(), addr); err != nil {
+		return err
+	}
+
+	buf, err := Serialize(secMessage)
+	if err != nil {
+		return err
+	}
+
+	_, err = tr.conn.WriteTo(buf, addr)
 	if err != nil {
 		return err
 	}
@@ -242,9 +256,48 @@ func WithRetries(retries int) SendOptions {
 	}
 }
 
+func (s *Server) Send(message *CoAPMessage, addr string, opts ...SendOptions) (*CoAPMessage, error) {
+	if message.GetScheme() != COAPS_SCHEME {
+		return s.send(message, addr, opts...)
+	}
+
+	tr := s.sr
+	if conn, ok := connStorage.GetTCP(addr); ok {
+		tr = newtransport(&tcpConnection{conn: conn.(*net.TCPConn)})
+	}
+
+	proxyAddr := message.ProxyAddr
+	if len(proxyAddr) > 0 {
+		proxyID := setProxyIDIfNeed(message, tr.conn.LocalAddr().String())
+		proxyAddr = fmt.Sprintf("%v%v", proxyAddr, proxyID)
+	}
+
+	_, err := s.serverHandshake(tr, message, addr, proxyAddr)
+	if err != nil {
+		return nil, err
+	}
+
+	message.Timeout = time.Second
+	msg, err := s.send(message, addr)
+	if err == nil {
+		return msg, nil
+	}
+
+	if !slices.Contains([]error{ErrorSessionExpired, ErrorSessionNotFound, ErrorClientSessionExpired, ErrorClientSessionNotFound}, err) {
+		return nil, err
+	}
+
+	_, err = s.serverHandshake(tr, message, addr, proxyAddr)
+	if err != nil {
+		return nil, err
+	}
+
+	return s.send(message, addr, opts...)
+}
+
 // Send отправляет сообщение на указанный адрес и возвращает ответ
 // используется вместо клиента, когда нужно отправить запрос с занятого сервером порта
-func (s *Server) Send(message *CoAPMessage, addr string, opts ...SendOptions) (*CoAPMessage, error) {
+func (s *Server) send(message *CoAPMessage, addr string, opts ...SendOptions) (*CoAPMessage, error) {
 	o := &sendOpts{
 		retries: 0,
 	}
@@ -278,6 +331,72 @@ func (s *Server) Send(message *CoAPMessage, addr string, opts ...SendOptions) (*
 	}
 
 	return nil, errors.New("timeout")
+}
+
+func (s *Server) serverHandshake(tr *transport, message *CoAPMessage, address string, proxyAddr string) (session.SecuredSession, error) {
+	ses, ok := getSessionForAddress(tr.conn.LocalAddr().String(), address, proxyAddr)
+	if ok {
+		return ses, nil
+	}
+
+	ses, err := session.NewSecuredSession(tr.privateKey)
+	if err != nil {
+		return session.SecuredSession{}, err
+	}
+
+	// Sending my Public Key.
+	// Receiving Peer's Public Key as a Response!
+	peerPublicKey, err := s.sendHelloFromServer(message, ses.Curve.GetPublicKey(), address)
+	if err != nil {
+		return session.SecuredSession{}, err
+	}
+
+	// assign new value
+	ses.PeerPublicKey = peerPublicKey
+
+	signature, err := ses.GetSignature()
+	if err != nil {
+		return session.SecuredSession{}, err
+	}
+
+	err = ses.Verify(signature)
+	if err != nil {
+		return session.SecuredSession{}, err
+	}
+
+	globalSessions.Set(tr.conn.LocalAddr().String(), address, proxyAddr, ses)
+	MetricSuccessfulHandhshakes.Inc()
+
+	return ses, nil
+}
+
+func (s *Server) sendHelloFromServer(origMessage *CoAPMessage, myPublicKey []byte, addr string) ([]byte, error) {
+	var peerPublicKey []byte
+	message := newClientHelloMessage(origMessage, myPublicKey)
+
+	respMsg, err := s.Send(message, addr)
+	if err != nil {
+		return nil, err
+	}
+
+	if respMsg == nil {
+		return nil, nil
+	}
+
+	optHandshake := respMsg.GetOption(OptionHandshakeType)
+	if optHandshake != nil {
+		if optHandshake.IntValue() == CoapHandshakeTypePeerHello {
+			peerPublicKey = respMsg.Payload.Bytes()
+		}
+	}
+
+	if origMessage.BreakConnectionOnPK != nil {
+		if origMessage.BreakConnectionOnPK(peerPublicKey) {
+			return nil, errors.New(ERR_KEYS_NOT_MATCH)
+		}
+	}
+
+	return peerPublicKey, err
 }
 
 // Serve запускает сервер на указанном соединении (например, если нужно использовать свой UDP-сервер)
@@ -381,6 +500,13 @@ func (s *Server) listenLoop() {
 				<-semaphore
 			}()
 
+			continue
+		}
+
+		// обработка ответных хендшейков после send
+		option := message.GetOption(OptionHandshakeType)
+		if option != nil && option.IntValue() == CoapHandshakeTypePeerHello && bq.Has(message) {
+			bq.Write(message)
 			continue
 		}
 
