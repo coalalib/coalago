@@ -150,7 +150,7 @@ func (s *Server) HandleTCPConn(conn net.Conn) {
 			msg.RemoveOptions(OptionProxyScheme)
 			msg.RemoveOptions(OptionProxyURI)
 
-			if err := s.sendTo(msg, parsedURL.Host); err != nil {
+			if err := s.sendMultyProxy(msg, parsedURL.Host); err != nil {
 				fmt.Println("send error:", err)
 				return
 			}
@@ -219,6 +219,25 @@ func (s *Server) GetPrivateKey() []byte {
 	return s.privatekey
 }
 
+func (s *Server) sendMultyProxy(message *CoAPMessage, addr string) error {
+	tr := s.sr
+	if conn, ok := connStorage.GetTCP(addr); ok {
+		tr = newtransport(&tcpConnection{conn: conn.(*net.TCPConn)})
+	}
+
+	buf, err := Serialize(message)
+	if err != nil {
+		return err
+	}
+
+	_, err = tr.conn.WriteTo(buf, addr)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func (s *Server) sendTo(message *CoAPMessage, addr string) error {
 	tr := s.sr
 	if conn, ok := connStorage.GetTCP(addr); ok {
@@ -226,7 +245,6 @@ func (s *Server) sendTo(message *CoAPMessage, addr string) error {
 	}
 
 	secMessage := message.Clone(true)
-
 	if err := securityOutputLayer(secMessage, tr.conn.LocalAddr().String(), addr); err != nil {
 		return err
 	}
@@ -489,7 +507,7 @@ func (s *Server) listenLoop() {
 				message.RemoveOptions(OptionProxyScheme)
 				message.RemoveOptions(OptionProxyURI)
 
-				if err := s.sendTo(message, parsedURL.Host); err != nil {
+				if err := s.sendMultyProxy(message, parsedURL.Host); err != nil {
 					fmt.Println("send error:", err)
 					return
 				}
