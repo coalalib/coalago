@@ -79,7 +79,7 @@ func newDialer(end chan struct{}, addr string) (Transport, error) {
 	if err != nil {
 		return nil, err
 	}
-	conn, err := net.DialUDP("udp4", nil, a)
+	conn, err := net.DialUDP("udp", nil, a)
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +93,7 @@ func newListener(addr string) (Transport, error) {
 	if err != nil {
 		return nil, err
 	}
-	conn, err := net.ListenUDP("udp4", a)
+	conn, err := net.ListenUDP("udp", a)
 	if err != nil {
 		return nil, err
 	}

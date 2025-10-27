@@ -91,7 +91,7 @@ func deviceUDP(addr string) {
 		return coalago.NewResponse(coalago.NewStringPayload("test device with id "+id), coalago.CoapCodeContent)
 	})
 
-	go server.Listen(":8890")
+	go server.Listen(":8896")
 
 	msg := coalago.NewCoAPMessage(coalago.CON, coalago.GET)
 	msg.SetURIPath("/ping")
