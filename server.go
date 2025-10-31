@@ -525,7 +525,7 @@ func (s *Server) listenLoop() {
 		option := message.GetOption(OptionHandshakeType)
 		if option != nil && option.IntValue() == CoapHandshakeTypePeerHello && bq.Has(message) {
 			bq.Write(message)
-			semaphore <- struct{}{}
+			<-semaphore
 			continue
 		}
 
