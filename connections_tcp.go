@@ -143,7 +143,7 @@ func newDialerTCP(addr string) (Transport, error) {
 	if err != nil {
 		return nil, err
 	}
-	conn, err := net.DialTCP("tcp4", nil, a)
+	conn, err := net.DialTCP("tcp", nil, a)
 	if err != nil {
 		return nil, err
 	}
@@ -156,7 +156,7 @@ func newListenerTCP(addr string) (Transport, error) {
 	if err != nil {
 		return nil, err
 	}
-	ln, err := net.ListenTCP("tcp4", a)
+	ln, err := net.ListenTCP("tcp", a)
 	if err != nil {
 		return nil, err
 	}
