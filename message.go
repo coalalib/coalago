@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"hash/crc32"
 	"net"
 	"net/url"
 	"sort"
@@ -188,7 +189,7 @@ func deserialize(data []byte) (*CoAPMessage, error) {
 				msg.Options = append(msg.Options, NewOption(optCode, intVal))
 
 			case OptionURIHost, OptionEtag, OptionLocationPath, OptionURIPath, OptionURIQuery,
-				OptionLocationQuery, OptionProxyURI, OptionСoapsUri:
+				OptionLocationQuery, OptionProxyURI, OptionСoapsUri, OptionChecksum:
 				msg.Options = append(msg.Options, NewOption(optCode, string(optionValue)))
 			default:
 				if lastOptionID&0x01 == 1 {
@@ -274,6 +275,76 @@ func Serialize(msg *CoAPMessage) ([]byte, error) {
 	}
 
 	return buf.Bytes(), nil
+}
+
+func applyChecksum(msg *CoAPMessage) error {
+	msg.RemoveOptions(OptionChecksum)
+
+	checksum, err := calculateChecksum(msg)
+	if err != nil {
+		return err
+	}
+
+	msg.AddOption(OptionChecksum, checksum)
+	return nil
+}
+
+func calculateChecksum(msg *CoAPMessage) (string, error) {
+	copyMsg := cloneForChecksum(msg)
+
+	buf, err := Serialize(copyMsg)
+	if err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("%08x", crc32.ChecksumIEEE(buf)), nil
+}
+
+func cloneForChecksum(msg *CoAPMessage) *CoAPMessage {
+	copyMsg := &CoAPMessage{
+		MessageID: msg.MessageID,
+		Type:      msg.Type,
+		Code:      msg.Code,
+		Token:     append([]byte(nil), msg.Token...),
+	}
+
+	if msg.Payload != nil {
+		copyMsg.Payload = NewBytesPayload(msg.Payload.Bytes())
+	} else {
+		copyMsg.Payload = NewEmptyPayload()
+	}
+
+	copyMsg.Options = make([]*CoAPMessageOption, 0, len(msg.Options))
+	for _, opt := range msg.Options {
+		if opt.Code == OptionChecksum {
+			continue
+		}
+		copyMsg.Options = append(copyMsg.Options, &CoAPMessageOption{
+			Code:  opt.Code,
+			Value: opt.Value,
+		})
+	}
+
+	return copyMsg
+}
+
+func verifyChecksum(msg *CoAPMessage) error {
+	option := msg.GetOption(OptionChecksum)
+	if option == nil {
+		return nil
+	}
+
+	expected := option.StringValue()
+	computed, err := calculateChecksum(msg)
+	if err != nil {
+		return err
+	}
+
+	if expected != computed {
+		return fmt.Errorf("%w: expected %s got %s", ErrChecksumMismatch, expected, computed)
+	}
+
+	return nil
 }
 
 func (m *CoAPMessage) Clone(includePayload bool) *CoAPMessage {
@@ -451,6 +522,14 @@ func (m *CoAPMessage) SetURIQuery(k, v string) {
 
 func (m *CoAPMessage) SetToken(t string) {
 	m.Token = []byte(t)
+}
+
+func (m *CoAPMessage) SetChecksum(checksum string) {
+	m.AddOption(OptionChecksum, checksum)
+}
+
+func (m *CoAPMessage) GetChecksum() string {
+	return m.GetOptionAsString(OptionChecksum)
 }
 
 func (message *CoAPMessage) SetSchemeCOAP() {

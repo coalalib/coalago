@@ -154,6 +154,9 @@ func receiveMessage(tr *transport, origMessage *CoAPMessage) (*CoAPMessage, erro
 
 		message, err := preparationReceivingBuffer(tr, buff[:n], tr.conn.RemoteAddr(), origMessage.ProxyAddr)
 		if err != nil {
+			if err == ErrChecksumMismatch {
+				continue
+			}
 			return nil, err
 		}
 		if !bytes.Equal(message.Token, origMessage.Token) {

@@ -225,6 +225,8 @@ func optionCodeToString(option OptionCode) string {
 		return "OptionСoapsUri"
 	case OptionProxySecurityID:
 		return "OptionSecurityID"
+	case OptionChecksum:
+		return "Checksum"
 	default:
 		return "Unknown"
 	}

@@ -249,6 +249,7 @@ const (
 	// OptionWindowtOffset             OptionCode = 3012
 
 	OptionСoapsUri OptionCode = 4005
+	OptionChecksum OptionCode = 4006
 )
 
 // Fragments/parts of a CoAP Message packet
@@ -278,6 +279,7 @@ var (
 	ErrNilAddr                       = errors.New("address cannot be nil")
 	ErrOptionLenghtOutOfRangePackets = errors.New("option length out of range packet")
 	ErrUndefinedScheme               = errors.New("undefined scheme")
+	ErrChecksumMismatch              = errors.New("checksum mismatch")
 	ErrMaxAttempts                   = errors.New("max attempts")
 	ErrorSessionNotFound             = errors.New("session not found")
 	ErrorClientSessionNotFound       = errors.New("client session not found")

@@ -598,6 +598,10 @@ func preparationSendingMessage(tr *transport, message *CoAPMessage, addr string)
 		return nil, err
 	}
 
+	if err := applyChecksum(secMessage); err != nil {
+		return nil, err
+	}
+
 	buf, err := Serialize(secMessage)
 	if err != nil {
 		return nil, err
@@ -618,6 +622,11 @@ func preparationReceivingBufferForStorageLocalStates(data []byte, senderAddr net
 	MetricReceivedMessages.Inc()
 	message.Sender = senderAddr
 
+	if err := verifyChecksum(message); err != nil {
+		fmt.Printf("checksum mismatch from %v: %v\n", senderAddr, err)
+		return nil, ErrChecksumMismatch
+	}
+
 	return message, nil
 }
 
@@ -633,6 +642,11 @@ func preparationReceivingBuffer(tr *transport, data []byte, senderAddr net.Addr,
 	MetricReceivedMessages.Inc()
 
 	message.Sender = senderAddr
+
+	if err := verifyChecksum(message); err != nil {
+		fmt.Printf("checksum mismatch from %v: %v\n", senderAddr, err)
+		return nil, ErrChecksumMismatch
+	}
 
 	if err := securityInputLayer(tr, message, proxyAddr); err != nil {
 		return nil, err
