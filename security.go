@@ -68,7 +68,6 @@ func getSessionForAddress(senderAddr, receiverAddr, proxyAddr string) (session.S
 func setSessionForAddress(securedSession session.SecuredSession, senderAddr, receiverAddr, proxyAddr string) {
 	globalSessions.Set(senderAddr, receiverAddr, proxyAddr, securedSession)
 	MetricSessionsRate.Inc()
-	MetricSessionsCount.Set(int64(globalSessions.ItemCount()))
 }
 
 func deleteSessionForAddress(senderAddr, receiverAddr, proxyAddr string) {

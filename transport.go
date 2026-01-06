@@ -17,6 +17,15 @@ var (
 	connStorage        = newConnectionStorage(SESSIONS_POOL_EXPIRATION)
 )
 
+func init() {
+	go func() {
+		ticker := time.NewTimer(time.Second * 30)
+		for range ticker.C {
+			MetricSessionsCount.Set(int64(globalSessions.ItemCount()))
+		}
+	}()
+}
+
 type transport struct {
 	conn           Transport
 	block2channels sync.Map
