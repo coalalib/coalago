@@ -46,17 +46,20 @@ func (ls *localState) processMessage(message *CoAPMessage) {
 
 	MetricReceivedMessages.Inc()
 
-	// Локальный обработчик, запускаемый вне критической секции
+	// Локальный обработчик, запускаемый вне критической секции.
+	// Дедупликация ретрансмитов: запись в StorageLocalStates НЕ удаляется
+	// после ответа — она живёт до истечения TTL, чтобы повторные сообщения
+	// с тем же sender+token попали на тот же localState и были отброшены
+	// здесь по флагу runnedHandler. CAS гарантирует, что хэндлер запускается
+	// ровно один раз даже при гонке нескольких ретрансмитов (в т.ч. пришедших
+	// во время выполнения исходного запроса).
 	localRespHandler := func(msg *CoAPMessage, err error) {
-		if atomic.LoadInt32(&ls.runnedHandler) == 1 {
+		if !atomic.CompareAndSwapInt32(&ls.runnedHandler, 0, 1) {
 			return
 		}
-		atomic.StoreInt32(&ls.runnedHandler, 1)
 		if err != nil {
 			return
 		}
-
-		StorageLocalStates.Delete(msg.Sender.String() + msg.GetTokenString())
 
 		if bq.Has(msg) {
 			bq.Write(msg)
