@@ -9,6 +9,11 @@ import (
 
 var StorageLocalStates = newShardedCache(3 * time.Minute)
 
+// postHandlerTTL — сколько ещё держим запись в StorageLocalStates после
+// возврата из хэндлера, чтобы поймать запоздалые ретрансмиты. Должно с
+// запасом покрывать клиентское окно ретрансмитов (timeWait*maxSendAttempts).
+const postHandlerTTL = 5 * time.Second
+
 type LocalStateFn func(*CoAPMessage)
 
 type Resourcer interface {
@@ -47,16 +52,19 @@ func (ls *localState) processMessage(message *CoAPMessage) {
 	MetricReceivedMessages.Inc()
 
 	// Локальный обработчик, запускаемый вне критической секции.
-	// Дедупликация ретрансмитов: запись в StorageLocalStates НЕ удаляется
-	// после ответа — она живёт до истечения TTL, чтобы повторные сообщения
-	// с тем же sender+token попали на тот же localState и были отброшены
-	// здесь по флагу runnedHandler. CAS гарантирует, что хэндлер запускается
-	// ровно один раз даже при гонке нескольких ретрансмитов (в т.ч. пришедших
-	// во время выполнения исходного запроса).
+	// Дедупликация ретрансмитов:
+	//   - первая прошедшая CAS горутина запускает хэндлер ровно один раз,
+	//     остальные (включая пришедшие во время выполнения) выходят сразу;
+	//   - после возврата из хэндлера запись держим ещё postHandlerTTL,
+	//     чтобы поглотить запоздалые ретрансмиты, и только после этого
+	//     отдадим её на удаление общему cleanupLoop'у. Никаких новых
+	//     горутин на каждый запрос не плодим.
 	localRespHandler := func(msg *CoAPMessage, err error) {
 		if !atomic.CompareAndSwapInt32(&ls.runnedHandler, 0, 1) {
 			return
 		}
+		defer StorageLocalStates.Expire(msg.Sender.String()+msg.GetTokenString(), postHandlerTTL)
+
 		if err != nil {
 			return
 		}
