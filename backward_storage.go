@@ -40,24 +40,25 @@ func (b *backwardStorage) Write(msg *CoAPMessage) {
 }
 
 func (b *backwardStorage) Read(id string) (*CoAPMessage, error) {
-	ch := make(chan *CoAPMessage)
-	b.mx.Lock()
-	b.m[id] = ch
-	b.mx.Unlock()
+	       ch := make(chan *CoAPMessage)
+	       b.mx.Lock()
+	       b.m[id] = ch
+	       b.mx.Unlock()
 
-	defer func() {
-		b.mx.Lock()
-		close(ch)
-		delete(b.m, id)
-		b.mx.Unlock()
-	}()
+	       // Remove from map before closing to prevent Write after close
+	       defer func() {
+		       b.mx.Lock()
+		       delete(b.m, id)
+		       b.mx.Unlock()
+		       close(ch)
+	       }()
 
-	select {
-	case msg := <-ch:
-		return msg, nil
-	case <-time.After(time.Second * 5):
-		return nil, errors.New("timeout")
-	}
+	       select {
+	       case msg := <-ch:
+		       return msg, nil
+	       case <-time.After(time.Second * 5):
+		       return nil, errors.New("timeout")
+	       }
 }
 
 func (b *backwardStorage) Get(id string) chan *CoAPMessage {
@@ -73,15 +74,13 @@ func (b *backwardStorage) Get(id string) chan *CoAPMessage {
 }
 
 func (b *backwardStorage) Delete(id string) {
-	b.mx.Lock()
-	defer b.mx.Unlock()
-	if ch, ok := b.m[id]; ok {
-		select {
-		case <-ch:
-			// Канал уже закрыт
-		default:
-			close(ch)
-		}
-		delete(b.m, id)
-	}
+	       b.mx.Lock()
+	       ch, ok := b.m[id]
+	       if ok {
+		       delete(b.m, id)
+		       b.mx.Unlock()
+		       close(ch)
+	       } else {
+		       b.mx.Unlock()
+	       }
 }
