@@ -3,6 +3,7 @@ package coalago_test
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"math/rand"
 
 	. "github.com/onsi/ginkgo/extensions/table"
@@ -138,6 +139,60 @@ var _ = Describe("Message", func() {
 				Entry("Token length is maximum", 8),
 				// Entry("Token length is out of range", 9, false),
 			)
+		})
+	})
+
+	Describe("Serialize and deserialize payloads with special characters", func() {
+		roundTrip := func(payload CoAPMessagePayload) *CoAPMessage {
+			message := NewCoAPMessage(CON, POST)
+			message.MessageID = 0x1234
+			message.Token = []byte{0x00, 0x01, 0xfe, 0xff}
+			message.Payload = payload
+			message.SetMediaType(MediaTypeApplicationOctetStream)
+
+			datagram, err := Serialize(message)
+			Expect(err).NotTo(HaveOccurred())
+
+			result, err := Deserialize(datagram)
+			Expect(err).NotTo(HaveOccurred())
+			return result
+		}
+
+		DescribeTable("preserves string payload bytes exactly",
+			func(body string) {
+				result := roundTrip(NewStringPayload(body))
+
+				Expect(result.Payload.Bytes()).To(Equal([]byte(body)))
+				Expect(result.Payload.String()).To(Equal(body))
+			},
+			Entry("quotes, slashes, whitespace and URL delimiters", "line1\nline2\r\n\t\"quoted\" 'single' \\\\ / ?&=%#[]{}()<>"),
+			Entry("unicode escape sequences", "\u041f\u0440\u0438\u0432\u0435\u0442, \u4e16\u754c, \U0001f680"),
+			Entry("NUL byte and CoAP payload marker byte", "prefix\x00middle\xffsuffix"),
+		)
+
+		It("preserves arbitrary binary payload bytes, including embedded payload markers", func() {
+			body := make([]byte, 256)
+			for i := range body {
+				body[i] = byte(i)
+			}
+
+			result := roundTrip(NewBytesPayload(body))
+
+			Expect(result.Payload.Bytes()).To(Equal(body))
+		})
+
+		It("serializes JSON payloads with special characters into valid JSON", func() {
+			source := map[string]interface{}{
+				"text":    "line1\nline2\r\n\t\"quoted\" \\\\ / <tag>&value",
+				"unicode": "\u041f\u0440\u0438\u0432\u0435\u0442, \u4e16\u754c, \U0001f680",
+			}
+
+			result := roundTrip(NewJSONPayload(source))
+
+			var decoded map[string]string
+			Expect(json.Unmarshal(result.Payload.Bytes(), &decoded)).To(Succeed())
+			Expect(decoded["text"]).To(Equal(source["text"]))
+			Expect(decoded["unicode"]).To(Equal(source["unicode"]))
 		})
 	})
 })

@@ -35,6 +35,8 @@ func (o *CoAPMessageOption) IntValue() int {
 	}
 
 	switch o.Value.(type) {
+	case MediaType:
+		return int(o.Value.(MediaType))
 	case int:
 		return o.Value.(int)
 	case int8:
@@ -69,6 +71,8 @@ func (o *CoAPMessageOption) Uint32Value() uint32 {
 	}
 
 	switch o.Value.(type) {
+	case MediaType:
+		return uint32(o.Value.(MediaType))
 	case int:
 		return uint32(o.Value.(int))
 	case int8:
@@ -103,6 +107,8 @@ func (o *CoAPMessageOption) Uint16Value() uint16 {
 	}
 
 	switch o.Value.(type) {
+	case MediaType:
+		return uint16(o.Value.(MediaType))
 	case int:
 		return uint16(o.Value.(int))
 	case int8:
