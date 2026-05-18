@@ -109,3 +109,41 @@ func TestBackwardStorageWriteDeliversToPendingRead(t *testing.T) {
 		t.Fatal("Read() left channel in storage after returning")
 	}
 }
+
+func TestBackwardStorageConcurrentWriteDeleteDoesNotPanic(t *testing.T) {
+	sender := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 5683}
+	message := NewCoAPMessage(ACK, CoapCodeContent)
+	message.Token = []byte("tok")
+	message.Sender = sender
+	id := message.GetTokenString() + sender.String()
+
+	for i := 0; i < 1000; i++ {
+		storage := &backwardStorage{m: make(map[string]chan *CoAPMessage)}
+		storage.Get(id)
+
+		done := make(chan struct{})
+		panicCh := make(chan any, 1)
+
+		go func() {
+			defer close(done)
+			defer func() {
+				if r := recover(); r != nil {
+					panicCh <- r
+				}
+			}()
+
+			for j := 0; j < 10; j++ {
+				storage.Write(message)
+			}
+		}()
+
+		storage.Delete(id)
+		<-done
+
+		select {
+		case r := <-panicCh:
+			t.Fatalf("Write() panicked during concurrent Delete(): %v", r)
+		default:
+		}
+	}
+}

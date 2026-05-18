@@ -24,18 +24,18 @@ func (b *backwardStorage) Has(msg *CoAPMessage) bool {
 
 func (b *backwardStorage) Write(msg *CoAPMessage) {
 	b.mx.RLock()
+	defer b.mx.RUnlock()
+
 	ch, ok := b.m[msg.GetTokenString()+msg.Sender.String()]
-	b.mx.RUnlock()
 
 	if !ok {
 		return
 	}
 
-	// Проверяем, что канал не закрыт
 	select {
 	case ch <- msg:
 	default:
-		// Канал может быть закрыт или полон
+		// Receiver is gone or not ready; this is a best-effort handoff.
 	}
 }
 
@@ -48,9 +48,11 @@ func (b *backwardStorage) Read(id string) (*CoAPMessage, error) {
 	// Remove from map before closing to prevent Write after close
 	defer func() {
 		b.mx.Lock()
-		delete(b.m, id)
+		if b.m[id] == ch {
+			delete(b.m, id)
+			close(ch)
+		}
 		b.mx.Unlock()
-		close(ch)
 	}()
 
 	select {
@@ -78,9 +80,7 @@ func (b *backwardStorage) Delete(id string) {
 	ch, ok := b.m[id]
 	if ok {
 		delete(b.m, id)
-		b.mx.Unlock()
 		close(ch)
-	} else {
-		b.mx.Unlock()
 	}
+	b.mx.Unlock()
 }
