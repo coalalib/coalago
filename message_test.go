@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"math/rand"
 
 	. "github.com/onsi/ginkgo/extensions/table"
@@ -181,6 +182,54 @@ var _ = Describe("Message", func() {
 			Expect(result.Payload.Bytes()).To(Equal(body))
 		})
 
+		It("preserves every possible single-byte payload value", func() {
+			for i := 0; i <= 0xff; i++ {
+				body := []byte{'p', 'r', 'e', byte(i), 'p', 'o', 's', 't'}
+
+				result := roundTrip(NewBytesPayload(body))
+
+				Expect(result.Payload.Bytes()).To(Equal(body), fmt.Sprintf("byte 0x%02x", i))
+			}
+		})
+
+		It("preserves all ASCII special and punctuation characters in string payloads", func() {
+			body := "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
+
+			result := roundTrip(NewStringPayload(body))
+
+			Expect(result.Payload.String()).To(Equal(body))
+			Expect(result.Payload.Bytes()).To(Equal([]byte(body)))
+		})
+
+		It("preserves ASCII control characters in string payloads", func() {
+			body := string([]byte{
+				0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+				0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+				0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+				0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+				0x7f,
+			})
+
+			result := roundTrip(NewStringPayload(body))
+
+			Expect(result.Payload.String()).To(Equal(body))
+			Expect(result.Payload.Bytes()).To(Equal([]byte(body)))
+		})
+
+		It("preserves common Unicode edge-case characters in string payloads", func() {
+			body := "\u041f\u0440\u0438\u0432\u0435\u0442 " +
+				"\u4e16\u754c " +
+				"\u0301\u0327\u20dd " +
+				"\u200b\u200c\u200d\ufeff " +
+				"\u00a0\u2028\u2029 " +
+				"\U0001f600\U0001f680\U0001f469\u200d\U0001f4bb"
+
+			result := roundTrip(NewStringPayload(body))
+
+			Expect(result.Payload.String()).To(Equal(body))
+			Expect(result.Payload.Bytes()).To(Equal([]byte(body)))
+		})
+
 		It("serializes JSON payloads with special characters into valid JSON", func() {
 			source := map[string]interface{}{
 				"text":    "line1\nline2\r\n\t\"quoted\" \\\\ / <tag>&value",
@@ -193,6 +242,25 @@ var _ = Describe("Message", func() {
 			Expect(json.Unmarshal(result.Payload.Bytes(), &decoded)).To(Succeed())
 			Expect(decoded["text"]).To(Equal(source["text"]))
 			Expect(decoded["unicode"]).To(Equal(source["unicode"]))
+		})
+
+		It("serializes JSON payloads containing all ASCII controls and punctuation", func() {
+			source := map[string]string{
+				"controls": string([]byte{
+					0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+					0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+					0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+					0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+					0x7f,
+				}),
+				"punctuation": "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~",
+			}
+
+			result := roundTrip(NewJSONPayload(source))
+
+			var decoded map[string]string
+			Expect(json.Unmarshal(result.Payload.Bytes(), &decoded)).To(Succeed())
+			Expect(decoded).To(Equal(source))
 		})
 	})
 })

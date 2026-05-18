@@ -1,6 +1,8 @@
 package coalago_test
 
 import (
+	"fmt"
+
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 
@@ -55,5 +57,57 @@ var _ = Describe("Options", func() {
 		Expect(result.GetOptionsAsString(OptionURIPath)).To(Equal([]string{"devices"}))
 		Expect(result.GetOptionsAsString(OptionURIQuery)).To(Equal([]string{"name=alpha beta/42&raw=%"}))
 		Expect(result.GetOptionProxyURIasString()).To(Equal("coap://host/path?x=1&y=two words"))
+	})
+
+	It("preserves every printable ASCII special character in URI query options", func() {
+		specials := "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
+
+		for _, r := range specials {
+			value := fmt.Sprintf("key=%c", r)
+			message := NewCoAPMessage(CON, GET)
+			message.Token = []byte{0x01, 0x02}
+			message.AddOption(OptionURIQuery, value)
+
+			datagram, err := Serialize(message)
+			Expect(err).NotTo(HaveOccurred())
+
+			result, err := Deserialize(datagram)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.GetOptionsAsString(OptionURIQuery)).To(Equal([]string{value}), fmt.Sprintf("rune %q", r))
+		}
+	})
+
+	It("preserves control characters in option values", func() {
+		value := string([]byte{
+			0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+			0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+			0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+			0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+			0x7f,
+		})
+		message := NewCoAPMessage(CON, GET)
+		message.Token = []byte{0x01, 0x02}
+		message.AddOption(OptionURIQuery, value)
+
+		datagram, err := Serialize(message)
+		Expect(err).NotTo(HaveOccurred())
+
+		result, err := Deserialize(datagram)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.GetOptionsAsString(OptionURIQuery)).To(Equal([]string{value}))
+	})
+
+	It("preserves Unicode edge-case characters in option values", func() {
+		value := "key=\u041f\u0440\u0438\u0432\u0435\u0442-\u4e16\u754c-\u0301\u0327\u20dd-\u200b\u200c\u200d\ufeff-\U0001f600"
+		message := NewCoAPMessage(CON, GET)
+		message.Token = []byte{0x01, 0x02}
+		message.AddOption(OptionURIQuery, value)
+
+		datagram, err := Serialize(message)
+		Expect(err).NotTo(HaveOccurred())
+
+		result, err := Deserialize(datagram)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.GetOptionsAsString(OptionURIQuery)).To(Equal([]string{value}))
 	})
 })
