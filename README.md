@@ -321,6 +321,10 @@ options. Unlike Coala Dart and Coala Java, the current Go package does not
 expose a high-level multicast discovery runner or a high-level observer
 registry API.
 
+This is normal for the Go implementation: it is aimed at explicit client/server
+and backend/tooling use cases where peers are usually configured directly, so
+high-level discovery is not required by default.
+
 If discovery is needed, send a raw `NON GET` message to the Coala convention
 endpoint:
 
