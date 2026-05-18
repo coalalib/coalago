@@ -253,7 +253,7 @@ func sendHelloFromClient(tr *transport, origMessage *CoAPMessage, myPublicKey []
 }
 
 func newClientHelloMessage(origMessage *CoAPMessage, myPublicKey []byte) *CoAPMessage {
-	message := NewCoAPMessage(CON, POST)
+	message := NewCoAPMessage(CON, GET)
 	message.AddOption(OptionHandshakeType, CoapHandshakeTypeClientHello)
 	message.Payload = NewBytesPayload(myPublicKey)
 	message.Token = generateToken(6)
