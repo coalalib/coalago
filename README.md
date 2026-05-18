@@ -329,7 +329,7 @@ Key differences:
 - Coala defines custom options: `OptionURIScheme` (`2111`),
   `OptionSelectiveRepeatWindowSize` (`3001`), `OptionProxySecurityID` (`3004`),
   `OptionHandshakeType` (`3999`), `OptionSessionNotFound` (`4001`),
-  `OptionSessionExpired` (`4003`), `OptionСoapsUri` (`4005`), and
+  `OptionSessionExpired` (`4003`), Coala secure URI (`4005`), and
   `OptionChecksum` (`4006`).
 - Large messages can use Coala selective-repeat ARQ on top of Block1/Block2,
   not only basic CoAP blockwise exchange.
