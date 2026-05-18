@@ -309,6 +309,10 @@ Default ARQ/window constants:
 | `MIN_WiNDOW_SIZE` | `50` |
 | `MAX_WINDOW_SIZE` | `1500` |
 
+`DEFAULT_WINDOW_SIZE = 300` is the normal Go implementation policy. It keeps
+the CoAP block size at `1024` bytes while allowing a larger selective-repeat
+ARQ send window than Swift/Dart/Java/C defaults.
+
 ## Discovery and Observe
 
 This module defines Coala/CoAP option constants used by discovery and Observe,
