@@ -39,6 +39,9 @@ type CoAPMessage struct {
 
 	ProxyAddr string          // ProxyAddr is the address of the proxy server.
 	Context   context.Context // Context carries deadlines, cancellation signals, and other request-scoped values.
+
+	// AddChecksumOnSend enables automatic OptionChecksum calculation in the send path.
+	AddChecksumOnSend bool
 }
 
 func NewCoAPMessage(messageType CoapType, messageCode CoapCode) *CoAPMessage {
@@ -71,6 +74,11 @@ func Deserialize(data []byte) (*CoAPMessage, error) {
 	}
 	if err != nil {
 		MetricBreakedMessages.Inc()
+		return m, err
+	}
+	if err := verifyChecksum(m); err != nil {
+		MetricBreakedMessages.Inc()
+		return nil, ErrChecksumMismatch
 	}
 	return m, err
 }
@@ -353,6 +361,7 @@ func (m *CoAPMessage) Clone(includePayload bool) *CoAPMessage {
 	cloneMessage.Options = m.Options
 	cloneMessage.ProxyAddr = m.ProxyAddr
 	cloneMessage.BreakConnectionOnPK = m.BreakConnectionOnPK
+	cloneMessage.AddChecksumOnSend = m.AddChecksumOnSend
 	if includePayload {
 		cloneMessage.Payload = m.Payload
 	}
@@ -526,6 +535,10 @@ func (m *CoAPMessage) SetToken(t string) {
 
 func (m *CoAPMessage) SetChecksum(checksum string) {
 	m.AddOption(OptionChecksum, checksum)
+}
+
+func (m *CoAPMessage) SetAddChecksumOnSend(enabled bool) {
+	m.AddChecksumOnSend = enabled
 }
 
 func (m *CoAPMessage) GetChecksum() string {

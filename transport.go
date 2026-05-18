@@ -607,10 +607,11 @@ func preparationSendingMessage(tr *transport, message *CoAPMessage, addr string)
 		return nil, err
 	}
 
-	// Пока отключаем
-	/*if err := applyChecksum(secMessage); err != nil {
-		return nil, err
-	}*/
+	if secMessage.AddChecksumOnSend {
+		if err := applyChecksum(secMessage); err != nil {
+			return nil, err
+		}
+	}
 
 	buf, err := Serialize(secMessage)
 	if err != nil {

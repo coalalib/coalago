@@ -308,6 +308,7 @@ func newBlockingMessage(
 	msg.Payload = NewBytesPayload(frame)
 	msg.SetURIPath(origMessage.GetURIPath())
 	msg.Token = origMessage.Token
+	msg.AddChecksumOnSend = origMessage.AddChecksumOnSend
 
 	queries := origMessage.GetOptions(OptionURIQuery)
 	msg.AddOptions(queries)

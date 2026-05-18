@@ -249,6 +249,12 @@ func (s *Server) sendTo(message *CoAPMessage, addr string) error {
 		return err
 	}
 
+	if secMessage.AddChecksumOnSend {
+		if err := applyChecksum(secMessage); err != nil {
+			return err
+		}
+	}
+
 	buf, err := Serialize(secMessage)
 	if err != nil {
 		return err

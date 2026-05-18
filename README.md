@@ -235,6 +235,7 @@ Server resource methods use `CoapMethodGet`, `CoapMethodPost`,
 | `SetMediaType(mediaType)` | Adds Content-Format. |
 | `AddOption`, `AddOptions`, `RemoveOptions` | Mutates CoAP options. |
 | `GetOption`, `GetOptions`, `GetOptionAsString` | Reads CoAP options. |
+| `AddChecksumOnSend`, `SetAddChecksumOnSend(true)` | Adds/refreshes `OptionChecksum` (`4006`) during send. |
 | `GetBlock1`, `GetBlock2` | Reads typed Block1/Block2 option metadata. |
 | `Clone(includePayload)` | Copies a message for retransmission or layer processing. |
 
@@ -359,6 +360,10 @@ Key differences:
   `OptionHandshakeType` (`3999`), `OptionSessionNotFound` (`4001`),
   `OptionSessionExpired` (`4003`), Coala secure URI (`4005`), and
   `OptionChecksum` (`4006`).
+- `OptionChecksum` is not added automatically by default. Set
+  `message.AddChecksumOnSend = true` or `message.SetAddChecksumOnSend(true)` to
+  add/refresh it during send; incoming deserialization verifies the CRC32
+  checksum over the serialized message with `OptionChecksum` removed.
 - Large messages can use Coala selective-repeat ARQ on top of Block1/Block2,
   not only basic CoAP blockwise exchange.
 - TCP support uses a length-prefixed CoAP frame stream.
