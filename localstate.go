@@ -9,10 +9,12 @@ import (
 
 var StorageLocalStates = newShardedCache(3 * time.Minute)
 
-// postHandlerTTL — сколько ещё держим запись в StorageLocalStates после
-// возврата из хэндлера, чтобы поймать запоздалые ретрансмиты. Должно с
-// запасом покрывать клиентское окно ретрансмитов (timeWait*maxSendAttempts).
-const postHandlerTTL = 5 * time.Second
+// ProcessedMessages — лёгкий дедупер уже обработанных запросов.
+// Ключ: sender+token, значение: struct{}{}. Запись живёт processedTTL и
+// нужна, чтобы отбросить запоздалые ретрансмиты без создания localState.
+var ProcessedMessages = newShardedCache(processedTTL)
+
+const processedTTL = 10 * time.Second
 
 type LocalStateFn func(*CoAPMessage)
 
@@ -55,15 +57,18 @@ func (ls *localState) processMessage(message *CoAPMessage) {
 	// Дедупликация ретрансмитов:
 	//   - первая прошедшая CAS горутина запускает хэндлер ровно один раз,
 	//     остальные (включая пришедшие во время выполнения) выходят сразу;
-	//   - после возврата из хэндлера запись держим ещё postHandlerTTL,
-	//     чтобы поглотить запоздалые ретрансмиты, и только после этого
-	//     отдадим её на удаление общему cleanupLoop'у. Никаких новых
-	//     горутин на каждый запрос не плодим.
+	//   - после возврата из хэндлера запись из StorageLocalStates удаляется
+	//     сразу, а ключ кладётся в ProcessedMessages на processedTTL — там
+	//     его и ловят запоздалые ретрансмиты (см. Server.processLocalState).
 	localRespHandler := func(msg *CoAPMessage, err error) {
 		if !atomic.CompareAndSwapInt32(&ls.runnedHandler, 0, 1) {
 			return
 		}
-		defer StorageLocalStates.Expire(msg.Sender.String()+msg.GetTokenString(), postHandlerTTL)
+		id := msg.Sender.String() + msg.GetTokenString()
+		defer func() {
+			StorageLocalStates.Delete(id)
+			ProcessedMessages.Set(id, struct{}{})
+		}()
 
 		if err != nil {
 			return

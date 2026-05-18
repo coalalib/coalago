@@ -57,21 +57,6 @@ func (c *shardedCache) Delete(key string) {
 	c.shard(key).Delete(key)
 }
 
-// Expire укорачивает TTL существующей записи: expiresAt становится now+ttl.
-// Если записи нет — no-op. Используется, чтобы после обработки запроса
-// быстрее освобождать память, сохранив запись лишь на время возможных
-// ретрансмитов.
-func (c *shardedCache) Expire(key string, ttl time.Duration) {
-	sh := c.shard(key)
-	v, ok := sh.Load(key)
-	if !ok {
-		return
-	}
-	item := v.(cacheItem)
-	item.expiresAt = time.Now().Add(ttl)
-	sh.Store(key, item)
-}
-
 func (c *shardedCache) ItemCount() int {
 	total := 0
 	for _, shard := range c.shards {
