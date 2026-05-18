@@ -39,6 +39,26 @@ Command-line client:
 go install github.com/coalalib/coalago/cmd/coap-cli@latest
 ```
 
+## Examples
+
+All runnable examples live under `examples/`:
+
+| Path | Description |
+| --- | --- |
+| `examples/basic` | UDP client/server large payload example. |
+| `examples/tcp` | TCP client/server example. |
+| `examples/tcp_nat` | TCP/UDP proxy and NAT-style device example. |
+
+Run an example by starting its server and client in separate shells:
+
+```bash
+go run ./examples/basic server
+go run ./examples/basic client
+
+go run ./examples/tcp --mode server
+go run ./examples/tcp --mode client
+```
+
 ## Quick Start
 
 ```go

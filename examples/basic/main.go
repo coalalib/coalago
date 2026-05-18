@@ -12,12 +12,12 @@ import (
 )
 
 const (
-	portForTest      int    = 1111
-	pathTestBlock1          = "/testblock1"
-	pathTestBlock2          = "/testblock2"
-	pathTestBlockMix        = "/testblockmix"
-	MAX_PAYLOAD_SIZE        = 1024
-	expectedResponseMessage = "Hello from Coala!:)"
+	portForTest             int = 1111
+	pathTestBlock1              = "/testblock1"
+	pathTestBlock2              = "/testblock2"
+	pathTestBlockMix            = "/testblockmix"
+	MAX_PAYLOAD_SIZE            = 1024
+	expectedResponseMessage     = "Hello from Coala!:)"
 )
 
 func main() {

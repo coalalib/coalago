@@ -21,11 +21,10 @@ const (
 
 func main() {
 	mode := flag.String("mode", "", "server|client")
-	useTCP := flag.Bool("tcp", false, "Use TCP instead of UDP")
 	flag.Parse()
 
 	if *mode == "" {
-		fmt.Println("Usage: main --mode server|client [--tcp]")
+		fmt.Println("Usage: main --mode server|client")
 		os.Exit(1)
 	}
 
@@ -35,16 +34,16 @@ func main() {
 
 	switch *mode {
 	case "server":
-		startServer(expectedPayload, expectedResponse, *useTCP)
+		startServer(expectedPayload, expectedResponse)
 	case "client":
-		startClient(expectedPayload, expectedResponse, *useTCP)
+		startClient(expectedPayload, expectedResponse)
 	default:
 		fmt.Println("Invalid mode. Use --mode server|client")
 		os.Exit(1)
 	}
 }
 
-func startServer(expectedPayload, expectedResponse []byte, useTCP bool) {
+func startServer(expectedPayload, expectedResponse []byte) {
 	s := coalago.NewServer()
 	s.POST(pathTestBlock1, func(message *coalago.CoAPMessage) *coalago.CoAPResourceHandlerResult {
 		fmt.Println("[SERVER] got request, payload size:", len(message.Payload.Bytes()))
@@ -55,15 +54,15 @@ func startServer(expectedPayload, expectedResponse []byte, useTCP bool) {
 	})
 
 	addr := fmt.Sprintf(":%d", portForTest)
-	fmt.Printf("Server listening on %s (TCP: %v)\n", addr, useTCP)
+	fmt.Printf("TCP server listening on %s\n", addr)
 	panic(s.ListenTCP(addr))
 }
 
-func startClient(expectedPayload, expectedResponse []byte, useTCP bool) {
-	c := coalago.NewClient()
+func startClient(expectedPayload, expectedResponse []byte) {
+	c := coalago.NewTCPClient()
 	var wg sync.WaitGroup
 	var count int32
-	scheme := "coap"
+	scheme := "coap+tcp"
 	for i := 0; i < 100; i++ {
 		wg.Add(1)
 		go func() {
