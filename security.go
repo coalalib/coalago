@@ -10,11 +10,12 @@ import (
 	"github.com/coalalib/coalago/session"
 )
 
-func securityOutputLayer(message *CoAPMessage, currentAddr, addr string) error {
+func securityOutputLayer(tr *transport, message *CoAPMessage, addr string) error {
 	if message.GetScheme() != COAPS_SCHEME {
 		return nil
 	}
 
+	currentAddr := tr.conn.LocalAddr().String()
 	setProxyIDIfNeed(message, currentAddr)
 
 	proxyAddr := message.ProxyAddr
@@ -25,7 +26,7 @@ func securityOutputLayer(message *CoAPMessage, currentAddr, addr string) error {
 		}
 	}
 
-	currentSession, ok := getSessionForAddress(currentAddr, addr, proxyAddr)
+	currentSession, ok := getSessionForAddress(tr, currentAddr, addr, proxyAddr)
 	if !ok {
 		return ErrorClientSessionNotFound
 	}
@@ -57,21 +58,22 @@ func getProxyIDIfNeed(proxyAddr string, senderAddr string) (uint32, bool) {
 	return 0, ok
 }
 
-func getSessionForAddress(senderAddr, receiverAddr, proxyAddr string) (session.SecuredSession, bool) {
-	securedSession, ok := globalSessions.Get(senderAddr, receiverAddr, proxyAddr)
+func getSessionForAddress(tr *transport, senderAddr, receiverAddr, proxyAddr string) (session.SecuredSession, bool) {
+	sessions := tr.sessionStorage()
+	securedSession, ok := sessions.Get(senderAddr, receiverAddr, proxyAddr)
 	if ok {
-		globalSessions.Set(senderAddr, receiverAddr, proxyAddr, securedSession)
+		sessions.Set(senderAddr, receiverAddr, proxyAddr, securedSession)
 	}
 	return securedSession, ok
 }
 
-func setSessionForAddress(securedSession session.SecuredSession, senderAddr, receiverAddr, proxyAddr string) {
-	globalSessions.Set(senderAddr, receiverAddr, proxyAddr, securedSession)
+func setSessionForAddress(tr *transport, securedSession session.SecuredSession, senderAddr, receiverAddr, proxyAddr string) {
+	tr.sessionStorage().Set(senderAddr, receiverAddr, proxyAddr, securedSession)
 	MetricSessionsRate.Inc()
 }
 
-func deleteSessionForAddress(senderAddr, receiverAddr, proxyAddr string) {
-	globalSessions.Delete(senderAddr, receiverAddr, proxyAddr)
+func deleteSessionForAddress(tr *transport, senderAddr, receiverAddr, proxyAddr string) {
+	tr.sessionStorage().Delete(senderAddr, receiverAddr, proxyAddr)
 }
 
 func securityInputLayer(tr *transport, message *CoAPMessage, proxyAddr string) error {
@@ -94,7 +96,7 @@ func handleCoapsScheme(tr *transport, message *CoAPMessage, proxyAddr string) er
 	if message.GetScheme() == COAPS_SCHEME {
 
 		addressSession := message.Sender.String()
-		currentSession, ok := getSessionForAddress(tr.conn.LocalAddr().String(), addressSession, proxyAddr)
+		currentSession, ok := getSessionForAddress(tr, tr.conn.LocalAddr().String(), addressSession, proxyAddr)
 
 		if !ok {
 			responseMessage := NewCoAPMessageId(ACK, CoapCodeUnauthorized, message.MessageID)
@@ -110,7 +112,7 @@ func handleCoapsScheme(tr *transport, message *CoAPMessage, proxyAddr string) er
 		// Decrypt message payload
 		err := decrypt(message, currentSession.AEAD)
 		if err != nil {
-			deleteSessionForAddress(tr.conn.LocalAddr().String(), addressSession, proxyAddr)
+			deleteSessionForAddress(tr, tr.conn.LocalAddr().String(), addressSession, proxyAddr)
 			responseMessage := NewCoAPMessageId(ACK, CoapCodeUnauthorized, message.MessageID)
 			responseMessage.AddOption(OptionSessionExpired, 1)
 			responseMessage.Token = message.Token
@@ -129,11 +131,11 @@ func handleCoapsScheme(tr *transport, message *CoAPMessage, proxyAddr string) er
 	sessionExpired := message.GetOption(OptionSessionExpired)
 	if message.Code == CoapCodeUnauthorized {
 		if sessionNotFound != nil {
-			deleteSessionForAddress(tr.conn.LocalAddr().String(), message.Sender.String(), proxyAddr)
+			deleteSessionForAddress(tr, tr.conn.LocalAddr().String(), message.Sender.String(), proxyAddr)
 			return ErrorSessionNotFound
 		}
 		if sessionExpired != nil {
-			deleteSessionForAddress(tr.conn.LocalAddr().String(), message.Sender.String(), proxyAddr)
+			deleteSessionForAddress(tr, tr.conn.LocalAddr().String(), message.Sender.String(), proxyAddr)
 			return ErrorSessionExpired
 		}
 	}
@@ -155,7 +157,7 @@ func receiveHandshake(tr *transport, privatekey []byte, message *CoAPMessage, pr
 		return false, nil
 	}
 
-	peerSession, ok := getSessionForAddress(tr.conn.LocalAddr().String(), message.Sender.String(), proxyAddr)
+	peerSession, ok := getSessionForAddress(tr, tr.conn.LocalAddr().String(), message.Sender.String(), proxyAddr)
 	if !ok {
 		if peerSession, err = session.NewSecuredSession(tr.privateKey); err != nil {
 			return false, ErrorHandshake
@@ -178,7 +180,7 @@ func receiveHandshake(tr *transport, privatekey []byte, message *CoAPMessage, pr
 		MetricSuccessfulHandhshakes.Inc()
 
 		peerSession.UpdatedAt = int(time.Now().Unix())
-		setSessionForAddress(peerSession, tr.conn.LocalAddr().String(), message.Sender.String(), proxyAddr)
+		setSessionForAddress(tr, peerSession, tr.conn.LocalAddr().String(), message.Sender.String(), proxyAddr)
 		return false, nil
 	}
 
@@ -186,7 +188,7 @@ func receiveHandshake(tr *transport, privatekey []byte, message *CoAPMessage, pr
 }
 
 func handshake(tr *transport, message *CoAPMessage, address net.Addr, proxyAddr string) (session.SecuredSession, error) {
-	ses, ok := getSessionForAddress(tr.conn.LocalAddr().String(), address.String(), proxyAddr)
+	ses, ok := getSessionForAddress(tr, tr.conn.LocalAddr().String(), address.String(), proxyAddr)
 	if ok {
 		return ses, nil
 
@@ -217,7 +219,7 @@ func handshake(tr *transport, message *CoAPMessage, address net.Addr, proxyAddr 
 		return session.SecuredSession{}, err
 	}
 
-	globalSessions.Set(tr.conn.LocalAddr().String(), address.String(), proxyAddr, ses)
+	tr.sessionStorage().Set(tr.conn.LocalAddr().String(), address.String(), proxyAddr, ses)
 	MetricSuccessfulHandhshakes.Inc()
 
 	return ses, nil

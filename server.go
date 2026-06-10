@@ -33,6 +33,11 @@ type Server struct {
 	addr           string       // сохраняем адрес для Refresh()
 	connectionType uint8        // битовая маска для TCP/UDP
 	proxyCache     *cache.Cache // token + addr -> proxyNote
+	// sessions держит шифрованные сессии ЭТОГО сервера. Хранилище не может быть общим
+	// на процесс: ключ сессии не содержит локальный адрес для проксированных пиров, и
+	// два сервера в одном бинарнике (со своими ключами) перетирали бы сессии друг друга
+	// для одного и того же peer+proxy.
+	sessions *sessionStorageImpl
 }
 
 func NewServer(opts ...Opt) *Server {
@@ -44,7 +49,15 @@ func NewServer(opts ...Opt) *Server {
 	return &Server{
 		privatekey: options.privatekey,
 		proxyCache: cache.New(time.Minute, time.Second), // token + addr -> proxyNote
+		sessions:   newSessionStorageImpl(SESSIONS_POOL_EXPIRATION),
 	}
+}
+
+// newServerTransport создает transport, привязанный к хранилищу сессий этого сервера.
+func (s *Server) newServerTransport(conn Transport) *transport {
+	tr := newtransport(conn)
+	tr.sessions = s.sessions
+	return tr
 }
 
 func (s *Server) ListenTCP(addr string) error {
@@ -64,7 +77,7 @@ func (s *Server) Listen(addr string) error {
 		return err
 	}
 
-	s.sr = newtransport(conn)
+	s.sr = s.newServerTransport(conn)
 	s.sr.privateKey = s.privatekey
 	fmt.Printf(
 		"COALA server start ADDR: %s, WS: %d, MinWS: %d, MaxWS: %d, Retransmit:%d, timeWait:%d, poolExpiration:%d\n",
@@ -100,7 +113,7 @@ func (s *Server) HandleTCPConn(conn net.Conn) {
 		connStorage.DeleteTCP(conn.RemoteAddr().String())
 	}()
 
-	tcpTr := newtransport(&tcpConnection{conn: conn.(*net.TCPConn)})
+	tcpTr := s.newServerTransport(&tcpConnection{conn: conn.(*net.TCPConn)})
 
 	buf := make([]byte, 65536)
 	for {
@@ -183,7 +196,7 @@ func (s *Server) Refresh() error {
 		return err
 	}
 
-	s.sr = newtransport(conn)
+	s.sr = s.newServerTransport(conn)
 	s.sr.privateKey = s.privatekey
 
 	go s.listenLoop() // перезапускаем цикл прослушивания в горутине
@@ -222,7 +235,7 @@ func (s *Server) GetPrivateKey() []byte {
 func (s *Server) sendMultyProxy(message *CoAPMessage, addr string) error {
 	tr := s.sr
 	if conn, ok := connStorage.GetTCP(addr); ok {
-		tr = newtransport(&tcpConnection{conn: conn.(*net.TCPConn)})
+		tr = s.newServerTransport(&tcpConnection{conn: conn.(*net.TCPConn)})
 	}
 
 	buf, err := Serialize(message)
@@ -241,11 +254,11 @@ func (s *Server) sendMultyProxy(message *CoAPMessage, addr string) error {
 func (s *Server) sendTo(message *CoAPMessage, addr string) error {
 	tr := s.sr
 	if conn, ok := connStorage.GetTCP(addr); ok {
-		tr = newtransport(&tcpConnection{conn: conn.(*net.TCPConn)})
+		tr = s.newServerTransport(&tcpConnection{conn: conn.(*net.TCPConn)})
 	}
 
 	secMessage := message.Clone(true)
-	if err := securityOutputLayer(secMessage, tr.conn.LocalAddr().String(), addr); err != nil {
+	if err := securityOutputLayer(tr, secMessage, addr); err != nil {
 		return err
 	}
 
@@ -287,7 +300,7 @@ func (s *Server) Send(message *CoAPMessage, addr string, opts ...SendOptions) (*
 
 	tr := s.sr
 	if conn, ok := connStorage.GetTCP(addr); ok {
-		tr = newtransport(&tcpConnection{conn: conn.(*net.TCPConn)})
+		tr = s.newServerTransport(&tcpConnection{conn: conn.(*net.TCPConn)})
 	}
 
 	proxyAddr := message.ProxyAddr
@@ -358,7 +371,7 @@ func (s *Server) send(message *CoAPMessage, addr string, opts ...SendOptions) (*
 }
 
 func (s *Server) serverHandshake(tr *transport, message *CoAPMessage, address string, proxyAddr string) (session.SecuredSession, error) {
-	ses, ok := getSessionForAddress(tr.conn.LocalAddr().String(), address, proxyAddr)
+	ses, ok := getSessionForAddress(tr, tr.conn.LocalAddr().String(), address, proxyAddr)
 	if ok {
 		return ses, nil
 	}
@@ -388,7 +401,7 @@ func (s *Server) serverHandshake(tr *transport, message *CoAPMessage, address st
 		return session.SecuredSession{}, err
 	}
 
-	globalSessions.Set(tr.conn.LocalAddr().String(), address, proxyAddr, ses)
+	tr.sessionStorage().Set(tr.conn.LocalAddr().String(), address, proxyAddr, ses)
 	MetricSuccessfulHandhshakes.Inc()
 
 	return ses, nil
@@ -427,7 +440,7 @@ func (s *Server) sendHelloFromServer(origMessage *CoAPMessage, myPublicKey []byt
 // нужно для прокси сервиса
 func (s *Server) Serve(conn *net.UDPConn) {
 	c := &connection{conn: conn}
-	s.sr = newtransport(c)
+	s.sr = s.newServerTransport(c)
 	s.sr.privateKey = s.privatekey
 }
 

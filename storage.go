@@ -121,10 +121,32 @@ type sessionStorageImpl struct {
 	storage *shardedCache
 }
 
+// sessionStorages tracks every session pool in the process (the global client pool and
+// one per Server) so the sessions metric covers all of them.
+var (
+	sessionStoragesMu sync.Mutex
+	sessionStorages   []*sessionStorageImpl
+)
+
 func newSessionStorageImpl(ttl time.Duration) *sessionStorageImpl {
-	return &sessionStorageImpl{
+	s := &sessionStorageImpl{
 		storage: newShardedCache(ttl),
 	}
+	sessionStoragesMu.Lock()
+	sessionStorages = append(sessionStorages, s)
+	sessionStoragesMu.Unlock()
+	return s
+}
+
+// sessionsTotalCount sums the item counts of every session pool in the process.
+func sessionsTotalCount() int {
+	sessionStoragesMu.Lock()
+	defer sessionStoragesMu.Unlock()
+	total := 0
+	for _, s := range sessionStorages {
+		total += s.ItemCount()
+	}
+	return total
 }
 
 func (s *sessionStorageImpl) Set(sender, receiver, proxy string, sess session.SecuredSession) {

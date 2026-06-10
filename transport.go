@@ -21,7 +21,7 @@ func init() {
 	go func() {
 		ticker := time.NewTimer(time.Second * 30)
 		for range ticker.C {
-			MetricSessionsCount.Set(int64(globalSessions.ItemCount()))
+			MetricSessionsCount.Set(int64(sessionsTotalCount()))
 		}
 	}()
 }
@@ -30,6 +30,11 @@ type transport struct {
 	conn           Transport
 	block2channels sync.Map
 	privateKey     []byte
+	// sessions is the session storage of the owning Server. Server-side transports must
+	// not share secured sessions across Server instances: each server has its own key
+	// pair, and the storage key omits the local address for proxied peers, so a shared
+	// pool lets one server's session overwrite another's for the same peer+proxy.
+	sessions *sessionStorageImpl
 }
 
 func newtransport(conn Transport) *transport {
@@ -37,6 +42,15 @@ func newtransport(conn Transport) *transport {
 	sr.conn = conn
 
 	return sr
+}
+
+// sessionStorage returns the per-server session storage when the transport belongs to a
+// Server, or the process-wide pool for client transports.
+func (tr *transport) sessionStorage() *sessionStorageImpl {
+	if tr.sessions != nil {
+		return tr.sessions
+	}
+	return globalSessions
 }
 
 func (tr *transport) SetPrivateKey(pk []byte) {
@@ -603,7 +617,7 @@ func (sr *transport) receiveARQBlock2(origMessage *CoAPMessage, inputMessage *Co
 func preparationSendingMessage(tr *transport, message *CoAPMessage, addr string) ([]byte, error) {
 	secMessage := message.Clone(true)
 
-	if err := securityOutputLayer(secMessage, tr.conn.LocalAddr().String(), addr); err != nil {
+	if err := securityOutputLayer(tr, secMessage, addr); err != nil {
 		return nil, err
 	}
 
