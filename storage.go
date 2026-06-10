@@ -106,6 +106,21 @@ func (c *shardedCache) cleanupLoop() {
 	}
 }
 
+// assembleBlocks склеивает принятые ARQ-блоки в один буфер. Емкость считается заранее:
+// последовательный append в цикле на больших телах (selftest ~2 МБ это 1500+ блоков)
+// многократно реаллоцирует и копирует буфер.
+func assembleBlocks(buf map[int][]byte, totalBlocks int) []byte {
+	size := 0
+	for i := 0; i < totalBlocks; i++ {
+		size += len(buf[i])
+	}
+	b := make([]byte, 0, size)
+	for i := 0; i < totalBlocks; i++ {
+		b = append(b, buf[i]...)
+	}
+	return b
+}
+
 func fnv32(key string) uint32 {
 	var hash uint32 = 2166136261
 	for i := 0; i < len(key); i++ {

@@ -39,9 +39,14 @@ func (c *connection) SetUDPRecvBuf(size int) int {
 
 func (c *connection) Close() error {
 	err := c.conn.Close()
-	// Если канал задан, то освобождаем ресурс
+	// Если канал задан, то освобождаем ресурс. Неблокирующее чтение: у listener-соединений
+	// канал создается пустым (токен кладет только newDialer), и блокирующее чтение
+	// подвешивало бы Close (а с ним и Server.Refresh) навсегда.
 	if c.end != nil {
-		<-c.end
+		select {
+		case <-c.end:
+		default:
+		}
 	}
 	return err
 }
@@ -66,8 +71,26 @@ func (c *connection) Write(buf []byte) (int, error) {
 	return c.conn.Write(buf)
 }
 
-func (c *connection) WriteTo(buf []byte, addr string) (int, error) {
+// resolvedAddrs кэширует разобранные ip:port адреса: WriteTo вызывается на каждый блок
+// ARQ-передачи (тысячи пакетов на одно большое тело), и повторный ResolveUDPAddr одного
+// и того же адреса — лишние парсинг и аллокации в горячем пути. TTL-кэш, а не карта:
+// адреса NAT-клиентов уникальны и без вытеснения память росла бы неограниченно.
+var resolvedAddrs = newShardedCache(SESSIONS_POOL_EXPIRATION)
+
+func resolveUDPAddrCached(addr string) (*net.UDPAddr, error) {
+	if v, ok := resolvedAddrs.Get(addr); ok {
+		return v.(*net.UDPAddr), nil
+	}
 	a, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil {
+		return nil, err
+	}
+	resolvedAddrs.Set(addr, a)
+	return a, nil
+}
+
+func (c *connection) WriteTo(buf []byte, addr string) (int, error) {
+	a, err := resolveUDPAddrCached(addr)
 	if err != nil {
 		return 0, err
 	}

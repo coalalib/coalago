@@ -520,6 +520,11 @@ func (s *Server) listenLoop() {
 
 		if message.GetOptionProxyURIasString() != "" {
 			go func() {
+				// Слот семафора освобождается на ЛЮБОМ выходе: ранний return при ошибке
+				// парсинга/отправки иначе навсегда съедает слот, и после maxParallel
+				// ошибок listenLoop блокируется и сервер перестает обрабатывать пакеты.
+				defer func() { <-semaphore }()
+
 				parsedURL, err := url.Parse(message.GetOptionProxyURIasString())
 				if err != nil {
 					fmt.Println("parse proxyUri error:", err)
@@ -537,7 +542,6 @@ func (s *Server) listenLoop() {
 				s.proxyCache.SetDefault(message.GetTokenString()+parsedURL.Host, &proxyNote{addr: senderAddr.String(), tr: s.sr})
 				MetricProxySessions.Set(int64(s.proxyCache.ItemCount()))
 				MetricProxySessionsRate.Inc()
-				<-semaphore
 			}()
 
 			continue
@@ -552,8 +556,8 @@ func (s *Server) listenLoop() {
 		}
 
 		go func() {
+			defer func() { <-semaphore }()
 			s.processLocalState(message, s.sr)
-			<-semaphore
 		}()
 	}
 }

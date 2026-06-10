@@ -19,7 +19,7 @@ var (
 
 func init() {
 	go func() {
-		ticker := time.NewTimer(time.Second * 30)
+		ticker := time.NewTicker(time.Second * 30)
 		for range ticker.C {
 			MetricSessionsCount.Set(int64(sessionsTotalCount()))
 		}
@@ -537,10 +537,7 @@ func (sr *transport) receiveARQBlock2(origMessage *CoAPMessage, inputMessage *Co
 			}
 			buf[block.BlockNumber] = inputMessage.Payload.Bytes()
 			if totalBlocks == len(buf) {
-				b := []byte{}
-				for i := 0; i < totalBlocks; i++ {
-					b = append(b, buf[i]...)
-				}
+				b := assembleBlocks(buf, totalBlocks)
 				inputMessage.Payload = NewBytesPayload(b)
 
 				ack := ackTo(origMessage, inputMessage, CoapCodeEmpty)
@@ -588,10 +585,7 @@ func (sr *transport) receiveARQBlock2(origMessage *CoAPMessage, inputMessage *Co
 		buf[block.BlockNumber] = inputMessage.Payload.Bytes()
 
 		if totalBlocks == len(buf) {
-			b := []byte{}
-			for i := 0; i < totalBlocks; i++ {
-				b = append(b, buf[i]...)
-			}
+			b := assembleBlocks(buf, totalBlocks)
 			inputMessage.Payload = NewBytesPayload(b)
 			ack := ackTo(origMessage, inputMessage, CoapCodeEmpty)
 			if err = sr.sendToSocket(ack); err != nil {

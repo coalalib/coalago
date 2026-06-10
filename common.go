@@ -6,25 +6,15 @@ import (
 	"math/rand"
 	"net"
 	"sync/atomic"
-	"time"
 )
 
-// GenerateMessageId generate a uint16 Message ID
-var currentMessageID int32
-
-func init() {
-	rand.Seed(time.Now().UnixNano())
-	currentMessageID = int32(rand.Intn(65535))
-}
+// currentMessageID monotonically increases; uint16 conversion wraps it naturally.
+// A single atomic Add keeps concurrent callers from racing between load and store
+// (the old check-then-set pattern could skip or duplicate ids under load).
+var currentMessageID = uint32(rand.Intn(65535))
 
 func generateMessageID() uint16 {
-	if atomic.LoadInt32(&currentMessageID) < 65535 {
-		atomic.AddInt32(&currentMessageID, 1)
-	} else {
-		atomic.StoreInt32(&currentMessageID, 1)
-	}
-
-	return uint16(atomic.LoadInt32(&currentMessageID))
+	return uint16(atomic.AddUint32(&currentMessageID, 1))
 }
 
 func generateToken(l int) []byte {

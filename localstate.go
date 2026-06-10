@@ -163,10 +163,7 @@ func localStateReceiveARQBlock1(sr *transport, totalBlocks int, buf map[int][]by
 
 	buf[block.BlockNumber] = inputMessage.Payload.Bytes()
 	if totalBlocks == len(buf) {
-		b := []byte{}
-		for i := 0; i < totalBlocks; i++ {
-			b = append(b, buf[i]...)
-		}
+		b := assembleBlocks(buf, totalBlocks)
 		inputMessage.Payload = NewBytesPayload(b)
 		return true, totalBlocks, buf, inputMessage, nil
 	}
