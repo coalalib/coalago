@@ -233,6 +233,13 @@ func (s *Server) GetPrivateKey() []byte {
 }
 
 func (s *Server) sendMultyProxy(message *CoAPMessage, addr string) error {
+	// Do not act as an open relay: only forward Proxy-URI messages when proxy
+	// mode has been explicitly enabled via Server.Proxy(true). Without this
+	// guard any peer could use the server as an SSRF pivot to arbitrary hosts.
+	if !s.proxyEnable {
+		return errors.New("proxy disabled")
+	}
+
 	tr := s.sr
 	if conn, ok := connStorage.GetTCP(addr); ok {
 		tr = s.newServerTransport(&tcpConnection{conn: conn.(*net.TCPConn)})
