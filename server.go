@@ -38,6 +38,12 @@ type Server struct {
 	// два сервера в одном бинарнике (со своими ключами) перетирали бы сессии друг друга
 	// для одного и того же peer+proxy.
 	sessions *sessionStorageImpl
+
+	tcpLn net.Listener // TCP-accept-листенер из listenTCP; нужен только чтобы Close() мог его закрыть
+	srMu  sync.Mutex   // защищает s.sr и s.tcpLn от гонки между Close/Refresh/Listen/listenTCP
+
+	closeOnce sync.Once // делает Close идемпотентным
+	closeErr  error     // результат первого Close; последующие вызовы возвращают его же
 }
 
 func NewServer(opts ...Opt) *Server {
@@ -77,8 +83,10 @@ func (s *Server) Listen(addr string) error {
 		return err
 	}
 
+	s.srMu.Lock()
 	s.sr = s.newServerTransport(conn)
 	s.sr.privateKey = s.privatekey
+	s.srMu.Unlock()
 	fmt.Printf(
 		"COALA server start ADDR: %s, WS: %d, MinWS: %d, MaxWS: %d, Retransmit:%d, timeWait:%d, poolExpiration:%d\n",
 		addr, DEFAULT_WINDOW_SIZE, MIN_WiNDOW_SIZE, MAX_WINDOW_SIZE, maxSendAttempts, timeWait, SESSIONS_POOL_EXPIRATION)
@@ -93,10 +101,21 @@ func (s *Server) listenTCP(addr string) error {
 		return err
 	}
 
+	s.srMu.Lock()
+	s.tcpLn = ln
+	s.srMu.Unlock()
+
 	fmt.Printf("COALA TCP server start ADDR: %s\n", addr)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
+			// Close() закрывает ln напрямую: без этой проверки Accept() после
+			// закрытия листенера возвращал бы ошибку немедленно (не блокируясь),
+			// и цикл крутился бы в busy-spin вместо штатного выхода.
+			if strings.Contains(err.Error(), "use of closed network connection") {
+				fmt.Println("tcp listener was closed")
+				return nil
+			}
 			fmt.Println("accept error:", err)
 			continue
 		}
@@ -179,6 +198,8 @@ func (s *Server) Refresh() error {
 	if s.addr == "" {
 		return fmt.Errorf("server address not set")
 	}
+
+	s.srMu.Lock()
 	// Закрываем старое соединение, если возможно
 	if s.sr != nil && s.sr.conn != nil {
 		if closer, ok := s.sr.conn.(interface{ Close() error }); ok {
@@ -193,15 +214,52 @@ func (s *Server) Refresh() error {
 		conn, err = newListener(s.addr)
 	}
 	if err != nil {
+		s.srMu.Unlock()
 		return err
 	}
 
 	s.sr = s.newServerTransport(conn)
 	s.sr.privateKey = s.privatekey
+	s.srMu.Unlock()
 
 	go s.listenLoop() // перезапускаем цикл прослушивания в горутине
 	fmt.Printf("server refreshed on ADDR: %s", s.addr)
 	return nil
+}
+
+// Close останавливает сервер, поднятый Listen() и/или ListenTCP(): закрывает
+// нижележащие сетевые соединения тем же приёмом, что и Refresh(), но не
+// открывает их заново. Закрытие s.sr.conn (UDP) и s.tcpLn (TCP accept-листенер)
+// разблокирует блокирующие вызовы чтения внутри listenLoop() и accept-цикла
+// listenTCP(), которые штатно завершаются сами, увидев ошибку
+// "use of closed network connection" — паники не будет.
+//
+// Идемпотентен: повторные вызовы не делают ничего и возвращают тот же результат,
+// что и первый вызов. Потокобезопасен относительно конкурентного Refresh(),
+// Listen()/ListenTCP() и уже запущенного listenLoop()/listenTCP().
+//
+// Замечание: если сервер был поднят через Serve(conn) (встраивание в чужой
+// UDP-сокет, используется прокси-сервисом) — s.sr указывает на тот же переданный
+// conn, что и при Listen(), поэтому Close() закроет и его, как и Refresh() уже
+// делает сегодня. Владельцу внешнего сокета в этом сценарии Close() вызывать не нужно.
+func (s *Server) Close() error {
+	s.closeOnce.Do(func() {
+		s.srMu.Lock()
+		defer s.srMu.Unlock()
+
+		if s.sr != nil && s.sr.conn != nil {
+			if closer, ok := s.sr.conn.(interface{ Close() error }); ok {
+				s.closeErr = closer.Close()
+			}
+		}
+
+		if s.tcpLn != nil {
+			if err := s.tcpLn.Close(); err != nil && s.closeErr == nil {
+				s.closeErr = err
+			}
+		}
+	})
+	return s.closeErr
 }
 
 func (s *Server) GET(path string, handler CoAPResourceHandler) {
