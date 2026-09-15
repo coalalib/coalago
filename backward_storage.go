@@ -69,7 +69,9 @@ func (b *backwardStorage) Get(id string) chan *CoAPMessage {
 
 	ch, ok := b.m[id]
 	if !ok {
-		ch = make(chan *CoAPMessage)
+		// буфер на одно сообщение: Write неблокирующий, а Server.send между итерациями
+		// ожидания (повторная отправка по таймауту) канал не читает - ответ терялся
+		ch = make(chan *CoAPMessage, 1)
 		b.m[id] = ch
 	}
 	return ch

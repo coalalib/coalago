@@ -23,9 +23,12 @@ type Resourcer interface {
 }
 
 type localState struct {
-	mx              sync.Mutex
-	bufBlock1       map[int][]byte
-	totalBlocks     int
+	mx          sync.Mutex
+	bufBlock1   map[int][]byte
+	totalBlocks int
+	// block2-ответ на запрос, отправленный через Server.Send (см. localStateReceiveARQBlock2)
+	bufBlock2       map[int][]byte
+	totalBlocks2    int
 	runnedHandler   int32
 	downloadStarted time.Time
 	r               Resourcer
@@ -36,6 +39,8 @@ func newLocalState(r Resourcer, tr *transport) *localState {
 	return &localState{
 		bufBlock1:       make(map[int][]byte),
 		totalBlocks:     -1,
+		bufBlock2:       make(map[int][]byte),
+		totalBlocks2:    -1,
 		downloadStarted: time.Now(),
 		r:               r,
 		tr:              tr,
@@ -48,6 +53,12 @@ func (ls *localState) processMessage(message *CoAPMessage) {
 
 	// Проверка безопасности
 	if ok, err := localStateSecurityInputLayer(ls.tr, message, ""); !ok || err != nil {
+		// 4.01 о потерянной/протухшей сессии в ответ на НАШ запрос отдаём ожидающему
+		// Server.send: иначе он узнаёт о ней только по таймауту, когда следующий sendTo
+		// не находит уже удалённую сессию
+		if err != nil && isSessionError(err) && bq.Has(message) {
+			bq.Write(message)
+		}
 		return
 	}
 
@@ -82,7 +93,7 @@ func (ls *localState) processMessage(message *CoAPMessage) {
 		requestOnReceive(ls.r.getResourceForPathAndMethod(msg.GetURIPath(), msg.GetMethod()), ls.tr, msg)
 	}
 	// Обновляем состояние (фрагментация/сборка блоков)
-	ls.totalBlocks, ls.bufBlock1 = localStateMessageHandlerSelector(ls.tr, ls.totalBlocks, ls.bufBlock1, message, localRespHandler)
+	localStateMessageHandlerSelector(ls, message, localRespHandler)
 }
 
 func MakeLocalStateFn(r Resourcer, tr *transport, _ func(*CoAPMessage, error)) LocalStateFn {
@@ -110,14 +121,21 @@ func localStateSecurityInputLayer(tr *transport, message *CoAPMessage, proxyAddr
 }
 
 func localStateMessageHandlerSelector(
-	sr *transport,
-	totalBlocks int,
-	buffer map[int][]byte,
+	ls *localState,
 	message *CoAPMessage,
 	respHandler func(*CoAPMessage, error),
-) (int, map[int][]byte) {
+) {
+	sr := ls.tr
 	block1 := message.GetBlock1()
 	block2 := message.GetBlock2()
+
+	// Преамбула block2-ответа на наш запрос (Server.send): пустой ACK с размером окна,
+	// за которым пойдут блоки. В respHandler её отдавать нельзя: он одноразовый, и после
+	// него все блоки отбрасывались бы как ретрансмиты уже обработанного токена, а Send
+	// получал бы пустой ответ вместо тела.
+	if isBlock2Preamble(message) && bq.Has(message) {
+		return
+	}
 
 	if block1 != nil {
 		if message.Type == CON {
@@ -125,7 +143,7 @@ func localStateMessageHandlerSelector(
 				ok  bool
 				err error
 			)
-			ok, totalBlocks, buffer, message, err = localStateReceiveARQBlock1(sr, totalBlocks, buffer, message)
+			ok, ls.totalBlocks, ls.bufBlock1, message, err = localStateReceiveARQBlock1(sr, ls.totalBlocks, ls.bufBlock1, message)
 
 			if err != nil {
 				fmt.Println("localStateMessageHandlerSelector error", err.Error())
@@ -135,20 +153,85 @@ func localStateMessageHandlerSelector(
 				go respHandler(message, err)
 			}
 		}
-		return totalBlocks, buffer
+		return
 	}
 
 	if block2 != nil {
-		if message.Type == ACK {
+		switch {
+		case message.Type == ACK:
+			// подтверждение блока, который отправляем мы (sendARQBlock2ACK)
 			id := message.Sender.String() + string(message.Token)
 			if c, ok := sr.block2channels.Load(id); ok {
 				c.(chan *CoAPMessage) <- message
 			}
+		case message.Type == CON && bq.Has(message):
+			// блок ответа на наш запрос (Server.send): собираем и подтверждаем здесь,
+			// receiveARQBlock2 не годится - сокет читает listenLoop, а не он
+			var (
+				ok  bool
+				err error
+			)
+			ok, ls.totalBlocks2, ls.bufBlock2, message, err = localStateReceiveARQBlock2(sr, ls.totalBlocks2, ls.bufBlock2, message)
+
+			if err != nil {
+				fmt.Println("localStateMessageHandlerSelector block2 error", err.Error())
+			}
+
+			if ok {
+				go respHandler(message, nil)
+			}
 		}
-		return totalBlocks, buffer
+		return
 	}
 	go respHandler(message, nil)
-	return totalBlocks, buffer
+}
+
+// isBlock2Preamble - первый пакет block2-передачи большого ответа, см. newACKEmptyMessage
+// в sendARQBlock2ACK
+func isBlock2Preamble(message *CoAPMessage) bool {
+	return message.Type == ACK && message.Code == CoapCodeEmpty &&
+		message.GetBlock2() == nil && message.GetOption(OptionSelectiveRepeatWindowSize) != nil
+}
+
+// localStateReceiveARQBlock2 собирает block2-ответ на запрос, отправленный через Server.Send.
+// Зеркало localStateReceiveARQBlock1 для другой стороны обмена: каждый блок подтверждается
+// 2.31 Continue, последний - пустым ACK, по которому отправитель завершает передачу
+// (sendARQBlock2ACK выходит на первом ACK с кодом, отличным от Continue).
+func localStateReceiveARQBlock2(sr *transport, totalBlocks int, buf map[int][]byte, inputMessage *CoAPMessage) (bool, int, map[int][]byte, *CoAPMessage, error) {
+	block := inputMessage.GetBlock2()
+	if block == nil || inputMessage.Type != CON {
+		return false, totalBlocks, buf, inputMessage, nil
+	}
+
+	if !block.MoreBlocks {
+		totalBlocks = block.BlockNumber + 1
+	}
+
+	buf[block.BlockNumber] = inputMessage.Payload.Bytes()
+	if totalBlocks == len(buf) {
+		b := assembleBlocks(buf, totalBlocks)
+		inputMessage.Payload = NewBytesPayload(b)
+
+		ack := ackTo(nil, inputMessage, CoapCodeEmpty)
+		if err := sr.sendToSocketByAddress(ack, inputMessage.Sender); err != nil {
+			return false, totalBlocks, buf, inputMessage, err
+		}
+		return true, totalBlocks, buf, inputMessage, nil
+	}
+
+	var ack *CoAPMessage
+	w := inputMessage.GetOption(OptionSelectiveRepeatWindowSize)
+	if w != nil {
+		ack = ackToWithWindowOffset(nil, inputMessage, CoapCodeContinue, w.IntValue(), block.BlockNumber, buf)
+	} else {
+		ack = ackTo(nil, inputMessage, CoapCodeContinue)
+	}
+
+	if err := sr.sendToSocketByAddress(ack, inputMessage.Sender); err != nil {
+		return false, totalBlocks, buf, inputMessage, err
+	}
+
+	return false, totalBlocks, buf, inputMessage, nil
 }
 
 func localStateReceiveARQBlock1(sr *transport, totalBlocks int, buf map[int][]byte, inputMessage *CoAPMessage) (bool, int, map[int][]byte, *CoAPMessage, error) {

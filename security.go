@@ -187,6 +187,27 @@ func receiveHandshake(tr *transport, privatekey []byte, message *CoAPMessage, pr
 	return false, ErrorHandshake
 }
 
+// isSessionError - ошибка обмена, после которой достаточно нового handshake
+func isSessionError(err error) bool {
+	return err == ErrorSessionExpired || err == ErrorSessionNotFound ||
+		err == ErrorClientSessionExpired || err == ErrorClientSessionNotFound
+}
+
+// sessionErrorOf переводит 4.01 с признаком сессии в ту же ошибку, которую получает
+// клиентский transport в handleCoapsScheme
+func sessionErrorOf(msg *CoAPMessage) error {
+	if msg == nil || msg.Code != CoapCodeUnauthorized {
+		return nil
+	}
+	if msg.GetOption(OptionSessionNotFound) != nil {
+		return ErrorSessionNotFound
+	}
+	if msg.GetOption(OptionSessionExpired) != nil {
+		return ErrorSessionExpired
+	}
+	return nil
+}
+
 func handshake(tr *transport, message *CoAPMessage, address net.Addr, proxyAddr string) (session.SecuredSession, error) {
 	ses, ok := getSessionForAddress(tr, tr.conn.LocalAddr().String(), address.String(), proxyAddr)
 	if ok {

@@ -6,7 +6,6 @@ import (
 	"io"
 	"net"
 	"net/url"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -93,6 +92,28 @@ func (s *Server) Listen(addr string) error {
 
 	s.listenLoop() // блокирующий цикл прослушивания
 	return nil
+}
+
+// ListenAsync поднимает UDP-сокет синхронно и запускает цикл приёма в фоне, возвращая
+// адрес, который реально занят (для ":0" - выбранный ОС порт). Нужен, когда сервер
+// используется как исходящий клиент с постоянного порта: Send нельзя звать, пока сокет
+// не открыт, а Listen блокируется и не сообщает, когда это произошло.
+func (s *Server) ListenAsync(addr string) (net.Addr, error) {
+	s.addr = addr
+	s.connectionType |= ConnectionTypeUDP
+
+	conn, err := newListener(addr)
+	if err != nil {
+		return nil, err
+	}
+
+	s.srMu.Lock()
+	s.sr = s.newServerTransport(conn)
+	s.sr.privateKey = s.privatekey
+	s.srMu.Unlock()
+
+	go s.listenLoop()
+	return conn.LocalAddr(), nil
 }
 
 func (s *Server) listenTCP(addr string) error {
@@ -379,13 +400,16 @@ func (s *Server) Send(message *CoAPMessage, addr string, opts ...SendOptions) (*
 		return nil, err
 	}
 
-	message.Timeout = time.Second
-	msg, err := s.send(message, addr)
+	// таймаут вызывающего уважаем: большой block2-ответ может не уложиться в секунду
+	if message.Timeout == 0 {
+		message.Timeout = time.Second
+	}
+	msg, err := s.send(message, addr, opts...)
 	if err == nil {
 		return msg, nil
 	}
 
-	if !slices.Contains([]error{ErrorSessionExpired, ErrorSessionNotFound, ErrorClientSessionExpired, ErrorClientSessionNotFound}, err) {
+	if !isSessionError(err) {
 		return nil, err
 	}
 
@@ -412,18 +436,29 @@ func (s *Server) send(message *CoAPMessage, addr string, opts ...SendOptions) (*
 		message.Timeout = time.Second
 	}
 
+	resolved, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil {
+		return nil, err
+	}
+
+	// канал ответа регистрируем ДО отправки: на одном хосте ответ успевает прийти
+	// раньше, чем Get его создаст, и уходил в обработчик ресурсов как чужой запрос
+	id := message.GetTokenString() + resolved.String()
+	ch := bq.Get(id)
+	defer bq.Delete(id)
+
 	if err := s.sendTo(message, addr); err != nil {
 		return nil, err
 	}
 
-	resolved, _ := net.ResolveUDPAddr("udp", addr)
-	ch := bq.Get(message.GetTokenString() + resolved.String())
-
-	defer bq.Delete(message.GetTokenString() + resolved.String())
-
 	for range o.retries + 1 {
 		select {
 		case msg := <-ch:
+			// 4.01 о потерянной/протухшей сессии отдаём как ошибку сразу: Send по ней
+			// делает новый handshake, а не ждёт таймаут, чтобы узнать о ней от sendTo
+			if err := sessionErrorOf(msg); err != nil {
+				return nil, err
+			}
 			return msg, nil
 		case <-time.After(message.Timeout):
 			if err := s.sendTo(message, addr); err != nil {
