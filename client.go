@@ -27,7 +27,7 @@ func NewClient(opts ...Opt) *Client {
 
 	return &Client{
 		privateKey: options.privatekey,
-		pool:       newConnpool(false),
+		pool:       newConnpool(false, options.idleConns),
 	}
 }
 
@@ -38,8 +38,15 @@ func NewTCPClient(opts ...Opt) *Client {
 	}
 	return &Client{
 		privateKey: options.privatekey,
-		pool:       newConnpool(true),
+		pool:       newConnpool(true, 0),
 	}
+}
+
+// Close закрывает сокеты, оставшиеся в пуле (см. WithIdleConns). Клиент после этого
+// пригоден к использованию: следующий запрос откроет сокет заново.
+func (c *Client) Close() error {
+	c.pool.Close()
+	return nil
 }
 
 func (c *Client) Send(message *CoAPMessage, addr string, options ...*CoAPMessageOption) (*Response, error) {
@@ -50,12 +57,11 @@ func (c *Client) Send(message *CoAPMessage, addr string, options ...*CoAPMessage
 		return nil, err
 	}
 
-	defer conn.Close()
-
 	sr := newtransport(conn)
 	sr.privateKey = c.privateKey
 
 	resp, err := sr.Send(message)
+	c.pool.Release(addr, conn, err == nil)
 	if err != nil {
 		return nil, err
 	}
@@ -111,15 +117,18 @@ func (c *Client) sendCONMessage(msg *CoAPMessage) (*Response, error) {
 }
 
 func (c *Client) sendCON(msg *CoAPMessage) (*CoAPMessage, error) {
-	conn, err := c.pool.Dial(msg.Recipient.String())
+	addr := msg.Recipient.String()
+	conn, err := c.pool.Dial(addr)
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
 
 	sr := newtransport(conn)
 	sr.privateKey = c.privateKey
-	return sr.Send(msg)
+
+	resp, err := sr.Send(msg)
+	c.pool.Release(addr, conn, err == nil)
+	return resp, err
 }
 
 func constructMessage(code CoapCode, uri string) (*CoAPMessage, error) {
