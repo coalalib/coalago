@@ -27,14 +27,26 @@ func init() {
 }
 
 type transport struct {
-	conn           Transport
-	block2channels sync.Map
-	privateKey     []byte
+	conn       Transport
+	privateKey []byte
 	// sessions is the session storage of the owning Server. Server-side transports must
 	// not share secured sessions across Server instances: each server has its own key
 	// pair, and the storage key omits the local address for proxied peers, so a shared
 	// pool lets one server's session overwrite another's for the same peer+proxy.
 	sessions *sessionStorageImpl
+
+	// block2 — каналы ACK-ов для блочных ответов (sendARQBlock2ACK), по обмену.
+	block2mu sync.Mutex
+	block2   map[exKey]chan *CoAPMessage
+
+	// laddr — строка локального адреса: ключ сессий на каждое coaps-сообщение, а
+	// LocalAddr().String() каждый раз форматирует адрес заново.
+	laddrOnce sync.Once
+	laddr     string
+
+	// rbuf — буфер чтения ответов: разбор копирует данные из буфера, поэтому один буфер
+	// служит всем чтениям обмена.
+	rbuf []byte
 }
 
 func newtransport(conn Transport) *transport {
@@ -57,13 +69,37 @@ func (tr *transport) SetPrivateKey(pk []byte) {
 	tr.privateKey = pk
 }
 
+func (tr *transport) localAddr() string {
+	tr.laddrOnce.Do(func() { tr.laddr = tr.conn.LocalAddr().String() })
+	return tr.laddr
+}
+
+// addrWriter — сокет, который пишет датаграмму по net.Addr без строкового адреса
+// (Transport.WriteTo принимает строку, и каждая запись разбирала её заново).
+type addrWriter interface {
+	writeToAddr(buf []byte, addr net.Addr) (int, error)
+}
+
+// udpAddrListener — сокет, который читает датаграмму вместе с *net.UDPAddr отправителя
+// за одну аллокацию адреса.
+type udpAddrListener interface {
+	listenUDPAddr(buf []byte) (int, *net.UDPAddr, error)
+}
+
+func (tr *transport) writeTo(buf []byte, addr net.Addr) (int, error) {
+	if w, ok := tr.conn.(addrWriter); ok {
+		return w.writeToAddr(buf, addr)
+	}
+	return tr.conn.WriteTo(buf, addr.String())
+}
+
 func (sr *transport) Send(message *CoAPMessage) (resp *CoAPMessage, err error) {
 	switch message.Type {
 	case CON:
 		if message.GetScheme() == COAPS_SCHEME {
 			proxyAddr := message.ProxyAddr
 			if len(proxyAddr) > 0 {
-				proxyID := setProxyIDIfNeed(message, sr.conn.LocalAddr().String())
+				proxyID := setProxyIDIfNeed(message, sr.localAddr())
 				proxyAddr = fmt.Sprintf("%v%v", proxyAddr, proxyID)
 			}
 
@@ -79,7 +115,7 @@ func (sr *transport) Send(message *CoAPMessage) (resp *CoAPMessage, err error) {
 			if message.GetScheme() == COAPS_SCHEME {
 				proxyAddr := message.ProxyAddr
 				if len(proxyAddr) > 0 {
-					proxyID := setProxyIDIfNeed(message, sr.conn.LocalAddr().String())
+					proxyID := setProxyIDIfNeed(message, sr.localAddr())
 					proxyAddr = fmt.Sprintf("%v%v", proxyAddr, proxyID)
 				}
 				if _, err := handshake(sr, message, sr.conn.RemoteAddr(), proxyAddr); err != nil {
@@ -112,7 +148,7 @@ func (sr *transport) sendCON(message *CoAPMessage) (resp *CoAPMessage, err error
 		return
 	}
 
-	data, err := preparationSendingMessage(sr, message, sr.conn.RemoteAddr().String())
+	data, err := preparationSendingMessage(sr, message, sr.conn.RemoteAddr())
 	if err != nil {
 		return nil, err
 	}
@@ -171,10 +207,19 @@ func (sr *transport) sendACKTo(message *CoAPMessage, addr net.Addr) (err error) 
 	if message.Type == ACK {
 		if isBigPayload(message) {
 			ch := make(chan *CoAPMessage, 102400)
-			id := addr.String() + message.GetTokenString()
-			sr.block2channels.Store(id, ch)
+			k := exKeyOf(peerKeyOf(addr), message.Token)
+			sr.block2mu.Lock()
+			if sr.block2 == nil {
+				sr.block2 = make(map[exKey]chan *CoAPMessage)
+			}
+			sr.block2[k] = ch
+			sr.block2mu.Unlock()
+
 			err = sr.sendARQBlock2ACK(ch, message, addr)
-			sr.block2channels.Delete(id)
+
+			sr.block2mu.Lock()
+			delete(sr.block2, k)
+			sr.block2mu.Unlock()
 			return err
 		}
 	}
@@ -183,7 +228,7 @@ func (sr *transport) sendACKTo(message *CoAPMessage, addr net.Addr) (err error) 
 }
 
 func (sr *transport) sendToSocket(message *CoAPMessage) error {
-	buf, err := preparationSendingMessage(sr, message, sr.conn.RemoteAddr().String())
+	buf, err := preparationSendingMessage(sr, message, sr.conn.RemoteAddr())
 	if err != nil {
 		return err
 	}
@@ -197,12 +242,12 @@ func (sr *transport) sendToSocket(message *CoAPMessage) error {
 }
 
 func (sr *transport) sendToSocketByAddress(message *CoAPMessage, addr net.Addr) error {
-	buf, err := preparationSendingMessage(sr, message, addr.String())
+	buf, err := preparationSendingMessage(sr, message, addr)
 	if err != nil {
 		return err
 	}
 	MetricSentMessages.Inc()
-	_, err = sr.conn.WriteTo(buf, addr.String())
+	_, err = sr.writeTo(buf, addr)
 	if err != nil {
 		MetricSentMessageErrors.Inc()
 	}
@@ -608,11 +653,14 @@ func (sr *transport) receiveARQBlock2(origMessage *CoAPMessage, inputMessage *Co
 	}
 }
 
-func preparationSendingMessage(tr *transport, message *CoAPMessage, addr string) ([]byte, error) {
+func preparationSendingMessage(tr *transport, message *CoAPMessage, addr net.Addr) ([]byte, error) {
 	secMessage := message.Clone(true)
+	secMessage.Payload = marshaledPayload(secMessage.Payload)
 
-	if err := securityOutputLayer(tr, secMessage, addr); err != nil {
-		return nil, err
+	if secMessage.GetScheme() == COAPS_SCHEME {
+		if err := securityOutputLayer(tr, secMessage, addr.String()); err != nil {
+			return nil, err
+		}
 	}
 
 	if secMessage.AddChecksumOnSend {
@@ -629,6 +677,9 @@ func preparationSendingMessage(tr *transport, message *CoAPMessage, addr string)
 	return buf, nil
 }
 
+// preparationReceivingBufferForStorageLocalStates разбирает входящую датаграмму сервера.
+// Контрольную сумму проверяет Deserialize; повторная проверка здесь не могла
+// разойтись с первой и только удваивала работу.
 func preparationReceivingBufferForStorageLocalStates(data []byte, senderAddr net.Addr) (*CoAPMessage, error) {
 	message, err := Deserialize(data)
 	if err != nil {
@@ -640,11 +691,6 @@ func preparationReceivingBufferForStorageLocalStates(data []byte, senderAddr net
 
 	MetricReceivedMessages.Inc()
 	message.Sender = senderAddr
-
-	if err := verifyChecksum(message); err != nil {
-		fmt.Printf("checksum mismatch from %v: %v\n", senderAddr, err)
-		return nil, ErrChecksumMismatch
-	}
 
 	return message, nil
 }
@@ -661,11 +707,6 @@ func preparationReceivingBuffer(tr *transport, data []byte, senderAddr net.Addr,
 	MetricReceivedMessages.Inc()
 
 	message.Sender = senderAddr
-
-	if err := verifyChecksum(message); err != nil {
-		fmt.Printf("checksum mismatch from %v: %v\n", senderAddr, err)
-		return nil, ErrChecksumMismatch
-	}
 
 	if err := securityInputLayer(tr, message, proxyAddr); err != nil {
 		return nil, err

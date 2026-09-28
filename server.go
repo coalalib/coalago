@@ -1,6 +1,7 @@
 package coalago
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -9,10 +10,10 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coalalib/coalago/session"
-	"github.com/patrickmn/go-cache"
 )
 
 const (
@@ -20,19 +21,22 @@ const (
 	ConnectionTypeTCP             // 2
 )
 
+// proxyNote — куда вернуть ответ на проксированный запрос: отправитель запроса и сокет,
+// с которого он пришёл.
 type proxyNote struct {
-	addr string
+	addr net.Addr
 	tr   *transport
 }
 
 type Server struct {
 	proxyEnable    bool
 	sr             *transport
-	resources      sync.Map
+	resources      atomic.Pointer[resourceMap]
+	resourcesMu    sync.Mutex // сериализует регистрацию ресурсов (копирование карты)
 	privatekey     []byte
-	addr           string       // сохраняем адрес для Refresh()
-	connectionType uint8        // битовая маска для TCP/UDP
-	proxyCache     *cache.Cache // token + addr -> proxyNote
+	addr           string      // сохраняем адрес для Refresh()
+	connectionType uint8       // битовая маска для TCP/UDP
+	proxies        *proxyTable // (адрес назначения, токен) -> proxyNote
 	// sessions держит шифрованные сессии ЭТОГО сервера. Хранилище не может быть общим
 	// на процесс: ключ сессии не содержит локальный адрес для проксированных пиров, и
 	// два сервера в одном бинарнике (со своими ключами) перетирали бы сессии друг друга
@@ -54,7 +58,7 @@ func NewServer(opts ...Opt) *Server {
 
 	return &Server{
 		privatekey: options.privatekey,
-		proxyCache: cache.New(time.Minute, time.Second), // token + addr -> proxyNote
+		proxies:    newProxyTable(time.Minute),
 		sessions:   newSessionStorageImpl(SESSIONS_POOL_EXPIRATION),
 	}
 }
@@ -146,6 +150,8 @@ func (s *Server) HandleTCPConn(conn net.Conn) {
 
 		connStorage.SetTCP(conn.RemoteAddr().String(), conn)
 
+		// Разбор копирует данные: buf переиспользуется следующим кадром, пока сообщение
+		// ещё обрабатывается.
 		msg, err := Deserialize(buf[:n])
 		if err != nil {
 			fmt.Println("deserialize error:", err)
@@ -153,12 +159,9 @@ func (s *Server) HandleTCPConn(conn net.Conn) {
 		}
 
 		msg.Sender = conn.RemoteAddr()
-		proxyUri := msg.GetOptionProxyURIasString()
-		if proxyUri == "" {
-			if v, ok := s.proxyCache.Get(msg.GetTokenString() + conn.RemoteAddr().String()); ok {
-				note := v.(*proxyNote)
-				s.proxyCache.SetDefault(msg.GetTokenString()+conn.RemoteAddr().String(), note)
-				note.tr.conn.WriteTo(buf[:n], note.addr)
+		if msg.GetOptionProxyURIasString() == "" {
+			if note, ok := s.proxies.get(messageKey(msg)); ok {
+				note.tr.writeTo(buf[:n], note.addr)
 				continue
 			}
 
@@ -168,30 +171,37 @@ func (s *Server) HandleTCPConn(conn net.Conn) {
 				continue
 			}
 
-			go s.processLocalState(msg, tcpTr)
+			workers.submit(rxTask{s: s, tr: tcpTr, msg: msg})
 			continue
 		}
 
-		go func() {
-			parsedURL, err := url.Parse(proxyUri)
-			if err != nil {
-				fmt.Println("parse proxyUri error:", err)
-				return
-			}
-
-			msg.RemoveOptions(OptionProxyScheme)
-			msg.RemoveOptions(OptionProxyURI)
-
-			if err := s.sendMultyProxy(msg, parsedURL.Host); err != nil {
-				fmt.Println("send error:", err)
-				return
-			}
-
-			s.proxyCache.SetDefault(msg.GetTokenString()+parsedURL.Host, &proxyNote{addr: msg.Sender.String(), tr: tcpTr})
-			MetricProxySessions.Set(int64(s.proxyCache.ItemCount()))
-			MetricProxySessionsRate.Inc()
-		}()
+		workers.submit(rxTask{s: s, tr: tcpTr, msg: msg, proxy: true})
 	}
+}
+
+// forwardProxy пересылает сообщение по его Proxy-URI и запоминает обратный маршрут.
+// Слот семафора (sem) освобождается на любом выходе: ранний return иначе навсегда
+// съедал бы слот, и после maxParallel ошибок listenLoop перестал бы принимать пакеты.
+func (s *Server) forwardProxy(message *CoAPMessage, tr *transport, sem chan struct{}) {
+	defer releaseSlot(sem)
+
+	parsedURL, err := url.Parse(message.GetOptionProxyURIasString())
+	if err != nil {
+		fmt.Println("parse proxyUri error:", err)
+		return
+	}
+
+	message.RemoveOptions(OptionProxyScheme)
+	message.RemoveOptions(OptionProxyURI)
+
+	if err := s.sendMultyProxy(message, parsedURL.Host); err != nil {
+		fmt.Println("send error:", err)
+		return
+	}
+
+	s.proxies.set(exKeyOf(peerKeyString(parsedURL.Host), message.Token), &proxyNote{addr: message.Sender, tr: tr})
+	MetricProxySessions.Set(int64(s.proxies.itemCount()))
+	MetricProxySessionsRate.Inc()
 }
 
 func (s *Server) Refresh() error {
@@ -370,7 +380,7 @@ func (s *Server) Send(message *CoAPMessage, addr string, opts ...SendOptions) (*
 
 	proxyAddr := message.ProxyAddr
 	if len(proxyAddr) > 0 {
-		proxyID := setProxyIDIfNeed(message, tr.conn.LocalAddr().String())
+		proxyID := setProxyIDIfNeed(message, tr.localAddr())
 		proxyAddr = fmt.Sprintf("%v%v", proxyAddr, proxyID)
 	}
 
@@ -412,14 +422,18 @@ func (s *Server) send(message *CoAPMessage, addr string, opts ...SendOptions) (*
 		message.Timeout = time.Second
 	}
 
+	// Ожидание регистрируется до отправки: ответ, опередивший регистрацию, ушёл бы в
+	// обработку как обычное сообщение, обмен пометился бы обработанным, и ответы на
+	// повторы отбрасывались бы как дубли.
+	resolved, _ := net.ResolveUDPAddr("udp", addr)
+	id := exKeyOf(peerKeyOf(resolved), message.Token)
+	ch := bq.Get(id)
+
+	defer bq.Delete(id)
+
 	if err := s.sendTo(message, addr); err != nil {
 		return nil, err
 	}
-
-	resolved, _ := net.ResolveUDPAddr("udp", addr)
-	ch := bq.Get(message.GetTokenString() + resolved.String())
-
-	defer bq.Delete(message.GetTokenString() + resolved.String())
 
 	for range o.retries + 1 {
 		select {
@@ -436,7 +450,7 @@ func (s *Server) send(message *CoAPMessage, addr string, opts ...SendOptions) (*
 }
 
 func (s *Server) serverHandshake(tr *transport, message *CoAPMessage, address string, proxyAddr string) (session.SecuredSession, error) {
-	ses, ok := getSessionForAddress(tr, tr.conn.LocalAddr().String(), address, proxyAddr)
+	ses, ok := getSessionForAddress(tr, tr.localAddr(), address, proxyAddr)
 	if ok {
 		return ses, nil
 	}
@@ -466,7 +480,7 @@ func (s *Server) serverHandshake(tr *transport, message *CoAPMessage, address st
 		return session.SecuredSession{}, err
 	}
 
-	tr.sessionStorage().Set(tr.conn.LocalAddr().String(), address, proxyAddr, ses)
+	tr.sessionStorage().Set(tr.localAddr(), address, proxyAddr, ses)
 	MetricSuccessfulHandhshakes.Inc()
 
 	return ses, nil
@@ -512,47 +526,69 @@ func (s *Server) Serve(conn *net.UDPConn) {
 // ServeMessage обрабатывает сообщение, как если бы оно пришло от клиента
 // нужно для прокси сервиса
 func (s *Server) ServeMessage(message *CoAPMessage) {
-	go s.processLocalState(message, s.sr)
+	workers.submit(rxTask{s: s, tr: s.sr, msg: message})
 }
 
-func (s *Server) processLocalState(message *CoAPMessage, tr *transport) {
-	id := message.Sender.String() + message.GetTokenString()
-	if _, dup := ProcessedMessages.Get(id); dup {
-		return
-	}
-	fnIfase, _ := StorageLocalStates.LoadOrStore(id, MakeLocalStateFn(s, tr, nil))
-	defer func() {
-		if r := recover(); r != nil {
-			fmt.Printf("panic in handler: %v\n", r)
-		}
-	}()
-
-	fnIfase.(LocalStateFn)(message)
-}
+// resourceMap — ресурсы по методу и пути. Карта неизменяемая: регистрация копирует её,
+// а поиск на каждом сообщении читает без замков. Раньше ключом была строка путь+метод
+// через fmt.Sprint, sync.Map и сборка пути сообщения — 4 аллокации на поиск.
+type resourceMap map[CoapMethod]map[string]*CoAPResource
 
 func (s *Server) addResource(res *CoAPResource) {
-	key := res.Path + fmt.Sprint(res.Method)
-	s.resources.Store(key, res)
+	s.resourcesMu.Lock()
+	defer s.resourcesMu.Unlock()
+
+	next := make(resourceMap)
+	if cur := s.resources.Load(); cur != nil {
+		for method, byPath := range *cur {
+			next[method] = make(map[string]*CoAPResource, len(byPath))
+			for path, r := range byPath {
+				next[method][path] = r
+			}
+		}
+	}
+	if next[res.Method] == nil {
+		next[res.Method] = make(map[string]*CoAPResource)
+	}
+	next[res.Method][res.Path] = res
+	s.resources.Store(&next)
 }
 
-func (s *Server) getResourceForPathAndMethod(path string, method CoapMethod) *CoAPResource {
-	path = strings.Trim(path, "/ ")
-	if res, ok := s.resources.Load("*" + fmt.Sprint(method)); ok {
-		return res.(*CoAPResource)
+// resourceFor — ресурс для запроса: сначала «*» метода, затем путь сообщения без
+// крайних «/» и пробелов. Путь собирается в буфере на стеке, без аллокации.
+func (s *Server) resourceFor(msg *CoAPMessage) *CoAPResource {
+	resources := s.resources.Load()
+	if resources == nil {
+		return nil
 	}
-	key := path + fmt.Sprint(method)
-	if res, ok := s.resources.Load(key); ok {
-		return res.(*CoAPResource)
+	byPath := (*resources)[msg.GetMethod()]
+	if res, ok := byPath["*"]; ok {
+		return res
 	}
-	return nil
+	var buf [128]byte
+	return byPath[string(bytes.Trim(msg.appendURIPath(buf[:0]), "/ "))]
 }
 
 func (s *Server) listenLoop() {
 	semaphore := make(chan struct{}, maxParallel)
+	// Один буфер на цикл: разбор копирует токен, опции и тело, сообщение буфер не держит.
+	readBuf := make([]byte, MTU+1)
 
 	for {
-		readBuf := make([]byte, MTU+1)
-		n, senderAddr, err := s.sr.conn.Listen(readBuf)
+		tr := s.sr
+		var (
+			n          int
+			senderAddr net.Addr
+			err        error
+		)
+		if l, ok := tr.conn.(udpAddrListener); ok {
+			var from *net.UDPAddr
+			if n, from, err = l.listenUDPAddr(readBuf); err == nil {
+				senderAddr = from
+			}
+		} else {
+			n, senderAddr, err = tr.conn.Listen(readBuf)
+		}
 		if err != nil {
 			if strings.Contains(err.Error(), "use of closed network connection") {
 				fmt.Println("connection was closed")
@@ -574,41 +610,15 @@ func (s *Server) listenLoop() {
 			continue
 		}
 
-		if v, ok := s.proxyCache.Get(message.GetTokenString() + senderAddr.String()); ok {
-			note := v.(*proxyNote)
-			s.proxyCache.SetDefault(message.GetTokenString()+senderAddr.String(), note)
-			note.tr.conn.WriteTo(readBuf[:n], note.addr)
+		if note, ok := s.proxies.get(messageKey(message)); ok {
+			note.tr.writeTo(readBuf[:n], note.addr)
 			continue
 		}
 
 		semaphore <- struct{}{}
 
 		if message.GetOptionProxyURIasString() != "" {
-			go func() {
-				// Слот семафора освобождается на ЛЮБОМ выходе: ранний return при ошибке
-				// парсинга/отправки иначе навсегда съедает слот, и после maxParallel
-				// ошибок listenLoop блокируется и сервер перестает обрабатывать пакеты.
-				defer func() { <-semaphore }()
-
-				parsedURL, err := url.Parse(message.GetOptionProxyURIasString())
-				if err != nil {
-					fmt.Println("parse proxyUri error:", err)
-					return
-				}
-
-				message.RemoveOptions(OptionProxyScheme)
-				message.RemoveOptions(OptionProxyURI)
-
-				if err := s.sendMultyProxy(message, parsedURL.Host); err != nil {
-					fmt.Println("send error:", err)
-					return
-				}
-
-				s.proxyCache.SetDefault(message.GetTokenString()+parsedURL.Host, &proxyNote{addr: senderAddr.String(), tr: s.sr})
-				MetricProxySessions.Set(int64(s.proxyCache.ItemCount()))
-				MetricProxySessionsRate.Inc()
-			}()
-
+			workers.submit(rxTask{s: s, tr: tr, msg: message, sem: semaphore, proxy: true})
 			continue
 		}
 
@@ -620,10 +630,7 @@ func (s *Server) listenLoop() {
 			continue
 		}
 
-		go func() {
-			defer func() { <-semaphore }()
-			s.processLocalState(message, s.sr)
-		}()
+		workers.submit(rxTask{s: s, tr: tr, msg: message, sem: semaphore})
 	}
 }
 

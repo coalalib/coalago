@@ -53,7 +53,7 @@ func (block *block) FromInt(blockValue int) error {
 
 	block.BlockNumber = num
 	block.MoreBlocks = m != 0
-	block.BlockSize = int(math.Pow(2, float64(szx+4)))
+	block.BlockSize = 1 << (szx + 4) // 2^(szx+4), szx 0..7
 
 	return nil
 }

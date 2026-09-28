@@ -33,6 +33,15 @@ func requestOnReceive(resource *CoAPResource, sr *transport, message *CoAPMessag
 	return false
 }
 
+// responseToken — токен ответа об ошибке: токен запроса, а у запроса без токена —
+// случайный, как было всегда.
+func responseToken(message *CoAPMessage) []byte {
+	if len(message.Token) > 0 {
+		return message.Token
+	}
+	return generateToken(6)
+}
+
 func isPing(message *CoAPMessage) bool {
 	return message.Type == CON && message.Code == CoapCodeEmpty
 }
@@ -47,11 +56,8 @@ func returnPing(sr *transport, message *CoAPMessage) bool {
 }
 
 func methodNotAllowed(sr *transport, message *CoAPMessage) bool {
-	responseMessage := NewCoAPMessageId(ACK, CoapCodeMethodNotAllowed, message.MessageID)
+	responseMessage := newMessageWithID(ACK, CoapCodeMethodNotAllowed, message.MessageID, responseToken(message))
 	responseMessage.Payload = NewStringPayload("Method is not allowed for requested resource")
-	if len(message.Token) > 0 {
-		responseMessage.Token = message.Token
-	}
 	responseMessage.CloneOptions(message, OptionBlock1, OptionBlock2, OptionProxySecurityID)
 	sr.SendTo(responseMessage, message.Sender)
 	return false
@@ -60,12 +66,9 @@ func methodNotAllowed(sr *transport, message *CoAPMessage) bool {
 func returnResultFromResource(sr *transport, message *CoAPMessage, handlerResult *CoAPResourceHandlerResult) bool {
 	// @TODO: Validate Response code! handlerResult.Code
 
-	// Create ACK response with the same ID and given reponse Code
-	responseMessage := NewCoAPMessageId(ACK, handlerResult.Code, message.MessageID)
-	responseMessage.Payload = handlerResult.Payload
-
-	// Replicate Token of the original message if any
-	responseMessage.Token = message.Token
+	// Create ACK response with the same ID, Token and given reponse Code
+	responseMessage := newMessageWithID(ACK, handlerResult.Code, message.MessageID, message.Token)
+	responseMessage.Payload = marshaledPayload(handlerResult.Payload)
 
 	// Setup additional Content Format description if necessary
 	if handlerResult.MediaType >= 0 {
@@ -88,11 +91,8 @@ func returnResultFromResource(sr *transport, message *CoAPMessage, handlerResult
 }
 
 func noResource(sr *transport, message *CoAPMessage) bool {
-	responseMessage := NewCoAPMessageId(ACK, CoapCodeNotFound, message.MessageID)
+	responseMessage := newMessageWithID(ACK, CoapCodeNotFound, message.MessageID, responseToken(message))
 	responseMessage.Payload = NewStringPayload("Requested resource " + message.GetURIPath() + " does not exist")
-	if len(message.Token) > 0 {
-		responseMessage.Token = message.Token
-	}
 	responseMessage.CloneOptions(message, OptionBlock1, OptionBlock2, OptionProxySecurityID)
 	responseMessage.Recipient = message.Sender
 

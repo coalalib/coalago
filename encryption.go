@@ -36,10 +36,17 @@ func decrypt(message *CoAPMessage, aead session.AEAD) error {
 func encryptionOptions(message *CoAPMessage, address string, aead session.AEAD) error {
 	var associatedData []byte
 
-	coapsURI := aead.Seal([]byte(message.GetURI(address)), message.MessageID, associatedData)
-	message.RemoveOptions(OptionURIPath)
-	message.RemoveOptions(OptionURIQuery)
-	message.AddOption(OptionСoapsUri, string(coapsURI))
+	coapsURI := aead.Seal(message.appendURI(make([]byte, 0, 96), address), message.MessageID, associatedData)
+
+	// То же, что RemoveOptions(URIPath), RemoveOptions(URIQuery) и AddOption(CoapsUri),
+	// за один проход: порядок остальных опций сохраняется, прежний CoapsUri заменяется.
+	opts := make([]*CoAPMessageOption, 0, len(message.Options)+1)
+	for _, opt := range message.Options {
+		if opt.Code != OptionURIPath && opt.Code != OptionURIQuery && opt.Code != OptionСoapsUri {
+			opts = append(opts, opt)
+		}
+	}
+	message.Options = append(opts, NewOption(OptionСoapsUri, string(coapsURI)))
 
 	return nil
 }
