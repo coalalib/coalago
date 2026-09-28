@@ -1,7 +1,6 @@
 package coalago
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -9,7 +8,6 @@ import (
 	"hash/crc32"
 	"net"
 	"net/url"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -65,6 +63,30 @@ func NewCoAPMessageId(messageType CoapType, messageCode CoapCode, messageID uint
 	}
 }
 
+// newMessage — NewCoAPMessage с заданным токеном: для служебных сообщений, где токен
+// берётся из запроса, и генерировать свой незачем.
+func newMessage(messageType CoapType, messageCode CoapCode, token []byte) *CoAPMessage {
+	return &CoAPMessage{
+		MessageID: generateMessageID(),
+		Type:      messageType,
+		Code:      messageCode,
+		Payload:   NewEmptyPayload(),
+		Token:     token,
+		Timeout:   timeWait,
+	}
+}
+
+// newMessageWithID — NewCoAPMessageId с заданным токеном (ответы: ID и токен запроса).
+func newMessageWithID(messageType CoapType, messageCode CoapCode, messageID uint16, token []byte) *CoAPMessage {
+	return &CoAPMessage{
+		MessageID: messageID,
+		Type:      messageType,
+		Code:      messageCode,
+		Token:     token,
+		Timeout:   timeWait,
+	}
+}
+
 // Converts an array of bytes to a Mesasge object.
 // An error is returned if a parsing error occurs
 func Deserialize(data []byte) (*CoAPMessage, error) {
@@ -83,22 +105,55 @@ func Deserialize(data []byte) (*CoAPMessage, error) {
 	return m, err
 }
 
+// rxMessage — входящее сообщение одной аллокацией: само сообщение, его тело, токен и
+// первые rxInlineOptions опций лежат вместе. Прежний разбор делал ~11 аллокаций на
+// сообщение и оставлял токен и тело ссылками в буфер чтения, из-за чего буфер нельзя
+// было переиспользовать.
+type rxMessage struct {
+	msg     CoAPMessage
+	payload BytesPayload
+	tok     [8]byte
+	opts    [rxInlineOptions]CoAPMessageOption
+	optPtrs [rxInlineOptions]*CoAPMessageOption
+	nopts   int
+}
+
+const rxInlineOptions = 4
+
+func (r *rxMessage) addOption(code OptionCode, value interface{}) {
+	var opt *CoAPMessageOption
+	if r.nopts < rxInlineOptions {
+		opt = &r.opts[r.nopts]
+		opt.Code, opt.Value = code, value
+		if r.msg.Options == nil {
+			r.msg.Options = r.optPtrs[:0]
+		}
+	} else {
+		opt = NewOption(code, value)
+	}
+	r.nopts++
+	r.msg.Options = append(r.msg.Options, opt)
+}
+
+// deserialize разбирает датаграмму. Сообщение не ссылается на data: токен, опции и
+// тело скопированы, и буфер чтения можно сразу использовать снова.
 func deserialize(data []byte) (*CoAPMessage, error) {
 	defer func() {
 		recover()
 	}()
 
-	msg := &CoAPMessage{}
-
 	dataLen := len(data)
 	if dataLen < 4 {
-		return msg, ErrPacketLengthLessThan4
+		return &CoAPMessage{}, ErrPacketLengthLessThan4
 	}
 
 	ver := data[DataHeader] >> 6
 	if ver != 1 {
 		return nil, ErrInvalidCoapVersion
 	}
+
+	r := &rxMessage{}
+	msg := &r.msg
 
 	msg.Type = CoapType(data[DataHeader] >> 4 & 0x03)
 	tokenLength := data[DataHeader] & 0x0f
@@ -108,7 +163,13 @@ func deserialize(data []byte) (*CoAPMessage, error) {
 
 	// Token
 	if tokenLength > 0 {
-		msg.Token = data[DataTokenStart : DataTokenStart+tokenLength]
+		token := data[DataTokenStart : DataTokenStart+tokenLength]
+		if int(tokenLength) <= len(r.tok) {
+			msg.Token = r.tok[:tokenLength:tokenLength]
+			copy(msg.Token, token)
+		} else {
+			msg.Token = append([]byte(nil), token...)
+		}
 	}
 
 	/*
@@ -194,11 +255,11 @@ func deserialize(data []byte) (*CoAPMessage, error) {
 				if err != nil {
 					return nil, err
 				}
-				msg.Options = append(msg.Options, NewOption(optCode, intVal))
+				r.addOption(optCode, intVal)
 
 			case OptionURIHost, OptionEtag, OptionLocationPath, OptionURIPath, OptionURIQuery,
 				OptionLocationQuery, OptionProxyURI, OptionСoapsUri, OptionChecksum:
-				msg.Options = append(msg.Options, NewOption(optCode, string(optionValue)))
+				r.addOption(optCode, string(optionValue))
 			default:
 				if lastOptionID&0x01 == 1 {
 					return msg, ErrUnknownCriticalOption
@@ -206,11 +267,15 @@ func deserialize(data []byte) (*CoAPMessage, error) {
 			}
 			tmp = tmp[optionLength:]
 		} else {
-			msg.Options = append(msg.Options, NewOption(optCode, nil))
+			r.addOption(optCode, nil)
 		}
 	}
+	// Сообщение не должно делить опции со встроенным массивом через append: добавление
+	// опции в клон писало бы в ту же ячейку, что и добавление в оригинал.
+	msg.Options = msg.Options[:len(msg.Options):len(msg.Options)]
 
-	msg.Payload = NewBytesPayload(tmp)
+	r.payload.content = append([]byte{}, tmp...)
+	msg.Payload = &r.payload
 
 	err := validateMessage(msg)
 
@@ -218,6 +283,10 @@ func deserialize(data []byte) (*CoAPMessage, error) {
 }
 
 // Converts a message object to a byte array. Typically done prior to transmission
+//
+// Байты на выходе те же, что у прежней реализации (bytes.Buffer, sort.Sort и
+// valueToBytes на каждую опцию): размер считается заранее, буфер аллоцируется один раз,
+// числа и строки пишутся в него напрямую.
 func Serialize(msg *CoAPMessage) ([]byte, error) {
 	if option := msg.GetOption(OptionURIScheme); option != nil {
 		if option.Value == nil || option.IntValue() != COAPS_SCHEME {
@@ -225,64 +294,82 @@ func Serialize(msg *CoAPMessage) ([]byte, error) {
 		}
 	}
 
-	messageID := []byte{0, 0}
-	binary.BigEndian.PutUint16(messageID, msg.MessageID)
-
-	buf := bytes.Buffer{}
-	buf.Write([]byte{(1 << 6) | (uint8(msg.Type) << 4) | 0x0f&uint8(len(msg.Token))})
-	buf.Write([]byte{byte(msg.Code)})
-	buf.Write([]byte{messageID[0]})
-	buf.Write([]byte{messageID[1]})
-	buf.Write(msg.Token)
-
 	// Sort Options
-	sort.Sort(sortOptions(msg.Options))
+	sortOptionsStable(msg.Options)
 
+	var (
+		payload    []byte
+		payloadStr string
+		hasPayload bool
+	)
+	switch p := msg.Payload.(type) {
+	case nil:
+	case *BytesPayload:
+		payload, hasPayload = p.content, len(p.content) > 0
+	case *StringCoAPMessagePayload:
+		payloadStr, hasPayload = p.content, len(p.content) > 0
+	default:
+		if p.Length() > 0 {
+			payload, hasPayload = p.Bytes(), true
+		}
+	}
+
+	size := 4 + len(msg.Token)
 	lastOptionCode := 0
+	for _, opt := range msg.Options {
+		delta, length := int(opt.Code)-lastOptionCode, optionValueLen(opt.Value)
+		size += 1 + optionExtLen(delta) + optionExtLen(length) + length
+		lastOptionCode = int(opt.Code)
+	}
+	if hasPayload {
+		size += 1 + len(payload) + len(payloadStr)
+	}
+
+	buf := make([]byte, 0, size)
+	buf = append(buf,
+		(1<<6)|(uint8(msg.Type)<<4)|0x0f&uint8(len(msg.Token)),
+		byte(msg.Code),
+		byte(msg.MessageID>>8),
+		byte(msg.MessageID),
+	)
+	buf = append(buf, msg.Token...)
+
+	lastOptionCode = 0
 	for _, opt := range msg.Options {
 		optCode := int(opt.Code)
 		optDelta := optCode - lastOptionCode
 		optDeltaValue, _ := getOptionHeaderValue(optDelta)
-		byteValue := valueToBytes(opt.Value)
-		valueLength := len(byteValue)
-		optLength := valueLength
+		optLength := optionValueLen(opt.Value)
 		optLengthValue, _ := getOptionHeaderValue(optLength)
 
 		// Option Header
-		buf.Write([]byte{byte(optDeltaValue<<4 | optLengthValue)})
+		buf = append(buf, byte(optDeltaValue<<4|optLengthValue))
 
 		// Extended Delta & Length
 		if optDeltaValue == 13 {
-			optDelta -= 13
-			buf.Write([]byte{byte(optDelta)})
+			buf = append(buf, byte(optDelta-13))
 		} else if optDeltaValue == 14 {
-			tmpBuf := new(bytes.Buffer)
-			optDelta -= 269
-			binary.Write(tmpBuf, binary.BigEndian, uint16(optDelta))
-			buf.Write(tmpBuf.Bytes())
+			buf = binary.BigEndian.AppendUint16(buf, uint16(optDelta-269))
 		}
 
 		if optLengthValue == 13 {
-			optLength -= 13
-			buf.Write([]byte{byte(optLength)})
+			buf = append(buf, byte(optLength-13))
 		} else if optLengthValue == 14 {
-			tmpBuf := new(bytes.Buffer)
-			optLength -= 269
-			binary.Write(tmpBuf, binary.BigEndian, uint16(optLength))
-			buf.Write(tmpBuf.Bytes())
+			buf = binary.BigEndian.AppendUint16(buf, uint16(optLength-269))
 		}
 
 		// Option Value
-		buf.Write(byteValue)
+		buf = appendOptionValue(buf, opt.Value)
 		lastOptionCode = optCode
 	}
 
-	if msg.Payload != nil && msg.Payload.Length() > 0 {
-		buf.Write([]byte{PayloadMarker})
-		buf.Write(msg.Payload.Bytes())
+	if hasPayload {
+		buf = append(buf, PayloadMarker)
+		buf = append(buf, payload...)
+		buf = append(buf, payloadStr...)
 	}
 
-	return buf.Bytes(), nil
+	return buf, nil
 }
 
 func applyChecksum(msg *CoAPMessage) error {
@@ -356,8 +443,7 @@ func verifyChecksum(msg *CoAPMessage) error {
 }
 
 func (m *CoAPMessage) Clone(includePayload bool) *CoAPMessage {
-	cloneMessage := NewCoAPMessageId(m.Type, m.Code, m.MessageID)
-	cloneMessage.Token = m.Token
+	cloneMessage := newMessageWithID(m.Type, m.Code, m.MessageID, m.Token)
 	cloneMessage.Options = m.Options
 	cloneMessage.ProxyAddr = m.ProxyAddr
 	cloneMessage.BreakConnectionOnPK = m.BreakConnectionOnPK
@@ -385,12 +471,40 @@ func (m *CoAPMessage) GetSchemeString() string {
 }
 
 func (m *CoAPMessage) GetURI(host string) string {
-	result := m.GetSchemeString() + "://" + host + m.GetURIPath()
-	query := m.GetURIQueryString()
-	if len(query) > 0 {
-		result += "?" + query
+	return string(m.appendURI(nil, host))
+}
+
+// appendURI дописывает в dst то же, что возвращает GetURI, без промежуточных строк.
+func (m *CoAPMessage) appendURI(dst []byte, host string) []byte {
+	dst = append(dst, m.GetSchemeString()...)
+	dst = append(dst, "://"...)
+	dst = append(dst, host...)
+	dst = m.appendURIPath(dst)
+
+	// Query: как GetURIQueryString — опция без "=" (или с пустым ключом) даёт пустой
+	// элемент, пустая строка запроса не даёт "?".
+	queryStart := len(dst)
+	dst = append(dst, '?')
+	n := 0
+	for _, opt := range m.Options {
+		if opt.Code != OptionURIQuery {
+			continue
+		}
+		if n > 0 {
+			dst = append(dst, '&')
+		}
+		n++
+		q := opt.StringValue()
+		if i := strings.Index(q, "="); i > 0 {
+			dst = append(dst, url.QueryEscape(q[:i])...)
+			dst = append(dst, '=')
+			dst = append(dst, url.QueryEscape(q[i+1:])...)
+		}
 	}
-	return result
+	if len(dst) == queryStart+1 {
+		dst = dst[:queryStart]
+	}
+	return dst
 }
 
 func (m *CoAPMessage) GetMethod() CoapMethod {
@@ -429,9 +543,25 @@ func (m *CoAPMessage) GetURIPort() int {
 }
 
 func (m *CoAPMessage) GetURIPath() string {
-	opts := m.GetOptionsAsString(OptionURIPath)
+	var buf [128]byte
+	return string(m.appendURIPath(buf[:0]))
+}
 
-	return "/" + strings.Join(opts, "/")
+// appendURIPath дописывает "/" и сегменты пути через "/" (нестроковое значение сегмента
+// даёт пустой сегмент, как StringValue).
+func (m *CoAPMessage) appendURIPath(dst []byte) []byte {
+	dst = append(dst, '/')
+	n := 0
+	for _, opt := range m.Options {
+		if opt.Code == OptionURIPath {
+			if n > 0 {
+				dst = append(dst, '/')
+			}
+			dst = append(dst, opt.StringValue()...)
+			n++
+		}
+	}
+	return dst
 }
 
 func (m *CoAPMessage) GetURIQueryString() string {
@@ -464,15 +594,16 @@ func (m *CoAPMessage) GetURIQueryArray() []string {
 	return query
 }
 
+// GetURIQuery возвращает значение параметра q: как strings.SplitN(v, "=", 2) по каждой
+// query-опции, но без аллокаций.
 func (m *CoAPMessage) GetURIQuery(q string) string {
-	qs := m.GetURIQueryArray()
-
-	for _, v := range qs {
-		kv := strings.SplitN(v, "=", 2)
-		if len(kv) == 2 {
-			if kv[0] == q {
-				return kv[1]
-			}
+	for _, opt := range m.Options {
+		if opt.Code != OptionURIQuery {
+			continue
+		}
+		v := opt.StringValue()
+		if i := strings.IndexByte(v, '='); i >= 0 && v[:i] == q {
+			return v[i+1:]
 		}
 	}
 
@@ -641,7 +772,7 @@ type StringCoAPMessagePayload struct {
 }
 
 func (p *StringCoAPMessagePayload) Bytes() []byte {
-	return bytes.NewBufferString(p.content).Bytes()
+	return []byte(p.content)
 }
 func (p *StringCoAPMessagePayload) Length() int {
 	return len(p.content)
@@ -737,6 +868,16 @@ func (p *JSONPayload) Length() int {
 }
 func (p *JSONPayload) String() string {
 	return string(p.Bytes())
+}
+
+// marshaledPayload сериализует JSON-тело один раз: дальше его длину и байты спрашивают
+// проверка размера, шифрование и Serialize, и каждый вызов JSONPayload делал бы
+// json.Marshal заново. Остальные тела возвращаются как есть.
+func marshaledPayload(p CoAPMessagePayload) CoAPMessagePayload {
+	if jp, ok := p.(*JSONPayload); ok {
+		return NewBytesPayload(jp.Bytes())
+	}
+	return p
 }
 
 func isBigPayload(msg *CoAPMessage) bool {

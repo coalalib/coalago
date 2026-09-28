@@ -56,12 +56,12 @@ func TestShardedCacheLoadOrStore(t *testing.T) {
 }
 
 func TestBackwardStorageWriteDeliversToPendingRead(t *testing.T) {
-	storage := &backwardStorage{m: make(map[string]chan *CoAPMessage)}
+	storage := &backwardStorage{m: make(map[exKey]chan *CoAPMessage)}
 	sender := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 5683}
 	message := NewCoAPMessage(ACK, CoapCodeContent)
 	message.Token = []byte("tok")
 	message.Sender = sender
-	id := message.GetTokenString() + sender.String()
+	id := messageKey(message)
 
 	result := make(chan *CoAPMessage, 1)
 	errs := make(chan error, 1)
@@ -115,10 +115,10 @@ func TestBackwardStorageConcurrentWriteDeleteDoesNotPanic(t *testing.T) {
 	message := NewCoAPMessage(ACK, CoapCodeContent)
 	message.Token = []byte("tok")
 	message.Sender = sender
-	id := message.GetTokenString() + sender.String()
+	id := messageKey(message)
 
 	for i := 0; i < 1000; i++ {
-		storage := &backwardStorage{m: make(map[string]chan *CoAPMessage)}
+		storage := &backwardStorage{m: make(map[exKey]chan *CoAPMessage)}
 		storage.Get(id)
 
 		done := make(chan struct{})

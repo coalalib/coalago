@@ -130,10 +130,24 @@ func fnv32(key string) uint32 {
 	return hash
 }
 
-// sessionStorageImpl using shardedCache
-
+// sessionStorageImpl — шифрованные сессии по (локальный адрес, адрес пира, прокси).
+// Обращение к сессии идёт на каждое coaps-сообщение (расшифровка входящего и
+// шифрование ответа), поэтому хранилище типизированное: сессия лежит в карте как есть,
+// без упаковки в interface{} на каждую запись, срок продлевается на месте, без
+// повторной записи, а поиск собирает ключ в буфере на стеке, без аллокации.
 type sessionStorageImpl struct {
-	storage *shardedCache
+	ttl    int64
+	shards [shardCount]sessionShard
+}
+
+type sessionShard struct {
+	mu sync.Mutex
+	m  map[string]*sessionEntry
+}
+
+type sessionEntry struct {
+	sess    session.SecuredSession
+	expires int64 // под mu шарда
 }
 
 // sessionStorages tracks every session pool in the process (the global client pool and
@@ -144,9 +158,11 @@ var (
 )
 
 func newSessionStorageImpl(ttl time.Duration) *sessionStorageImpl {
-	s := &sessionStorageImpl{
-		storage: newShardedCache(ttl),
+	s := &sessionStorageImpl{ttl: int64(ttl)}
+	for i := range s.shards {
+		s.shards[i].m = make(map[string]*sessionEntry)
 	}
+	go s.cleanupLoop()
 	sessionStoragesMu.Lock()
 	sessionStorages = append(sessionStorages, s)
 	sessionStoragesMu.Unlock()
@@ -164,45 +180,116 @@ func sessionsTotalCount() int {
 	return total
 }
 
-func (s *sessionStorageImpl) Set(sender, receiver, proxy string, sess session.SecuredSession) {
+// sessionKey собирает ключ сессии в buf. Для проксированных пиров локальный адрес в
+// ключ не входит.
+func sessionKey(buf []byte, sender, receiver, proxy string) []byte {
 	if proxy != "" {
 		sender = ""
 	}
-	s.storage.Set(sender+receiver+proxy, sess)
+	buf = append(buf, sender...)
+	buf = append(buf, receiver...)
+	return append(buf, proxy...)
+}
+
+func (s *sessionStorageImpl) shard(key []byte) *sessionShard {
+	h := uint32(2166136261)
+	for _, c := range key {
+		h *= 16777619
+		h ^= uint32(c)
+	}
+	return &s.shards[h%shardCount]
+}
+
+func (s *sessionStorageImpl) Set(sender, receiver, proxy string, sess session.SecuredSession) {
+	var buf [128]byte
+	key := sessionKey(buf[:0], sender, receiver, proxy)
+	sh := s.shard(key)
+	e := &sessionEntry{sess: sess, expires: monoNow() + s.ttl}
+	sh.mu.Lock()
+	sh.m[string(key)] = e
+	sh.mu.Unlock()
 }
 
 func (s *sessionStorageImpl) Get(sender, receiver, proxy string) (session.SecuredSession, bool) {
-	if proxy != "" {
-		sender = ""
-	}
-	v, ok := s.storage.Get(sender + receiver + proxy)
+	return s.get(sender, receiver, proxy, false)
+}
+
+// getRefresh — Get с продлением срока сессии, как у записи заново.
+func (s *sessionStorageImpl) getRefresh(sender, receiver, proxy string) (session.SecuredSession, bool) {
+	return s.get(sender, receiver, proxy, true)
+}
+
+func (s *sessionStorageImpl) get(sender, receiver, proxy string, refresh bool) (session.SecuredSession, bool) {
+	var buf [128]byte
+	key := sessionKey(buf[:0], sender, receiver, proxy)
+	sh := s.shard(key)
+	now := monoNow()
+
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	e, ok := sh.m[string(key)]
 	if !ok {
 		return session.SecuredSession{}, false
 	}
-	return v.(session.SecuredSession), true
+	if e.expires <= now {
+		delete(sh.m, string(key))
+		return session.SecuredSession{}, false
+	}
+	if refresh {
+		e.expires = now + s.ttl
+	}
+	return e.sess, true
 }
 
 func (s *sessionStorageImpl) Delete(sender, receiver, proxy string) {
-	if proxy != "" {
-		sender = ""
-	}
-	s.storage.Delete(sender + receiver + proxy)
+	var buf [128]byte
+	key := sessionKey(buf[:0], sender, receiver, proxy)
+	sh := s.shard(key)
+	sh.mu.Lock()
+	delete(sh.m, string(key))
+	sh.mu.Unlock()
 }
 
 func (s *sessionStorageImpl) LoadOrStore(sender, receiver, proxy string, sess session.SecuredSession) (session.SecuredSession, bool) {
-	if proxy != "" {
-		sender = ""
+	if v, ok := s.Get(sender, receiver, proxy); ok {
+		return v, true
 	}
-	key := sender + receiver + proxy
-	if v, ok := s.storage.Get(key); ok {
-		return v.(session.SecuredSession), true
-	}
-	s.storage.Set(key, sess)
+	s.Set(sender, receiver, proxy, sess)
 	return sess, false
 }
 
 func (s *sessionStorageImpl) ItemCount() int {
-	return s.storage.ItemCount()
+	now := monoNow()
+	total := 0
+	for i := range s.shards {
+		sh := &s.shards[i]
+		sh.mu.Lock()
+		for _, e := range sh.m {
+			if e.expires > now {
+				total++
+			}
+		}
+		sh.mu.Unlock()
+	}
+	return total
+}
+
+func (s *sessionStorageImpl) cleanupLoop() {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		now := monoNow()
+		for i := range s.shards {
+			sh := &s.shards[i]
+			sh.mu.Lock()
+			for k, e := range sh.m {
+				if e.expires <= now {
+					delete(sh.m, k)
+				}
+			}
+			sh.mu.Unlock()
+		}
+	}
 }
 
 // proxySessionStorage using shardedCache

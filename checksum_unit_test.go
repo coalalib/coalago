@@ -86,7 +86,7 @@ func TestPreparationSendingMessageAddsChecksumWhenFlagEnabled(t *testing.T) {
 		remote: &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 5684},
 	})
 
-	datagram, err := preparationSendingMessage(tr, msg, "127.0.0.1:5684")
+	datagram, err := preparationSendingMessage(tr, msg, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 5684})
 	if err != nil {
 		t.Fatalf("prepare sending message: %v", err)
 	}

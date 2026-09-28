@@ -3,6 +3,7 @@ package coalago
 import (
 	"bytes"
 	"net"
+	"net/netip"
 	"sync"
 	"time"
 )
@@ -92,6 +93,46 @@ func (c *connection) Read(buff []byte) (int, error) {
 
 func (c *connection) Listen(buff []byte) (int, net.Addr, error) {
 	return c.conn.ReadFromUDP(buff)
+}
+
+// udpAddrBox — адрес отправителя вместе с памятью под IP: одна аллокация на датаграмму
+// вместо двух у ReadFromUDP.
+type udpAddrBox struct {
+	addr net.UDPAddr
+	ip   [net.IPv6len]byte
+}
+
+// listenUDPAddr читает датаграмму; адрес отправителя такой же, как вернул бы ReadFromUDP:
+// 4 байта IP для IPv4-сокета, 16 байт (IPv4-mapped) для двухстекового.
+func (c *connection) listenUDPAddr(buff []byte) (int, *net.UDPAddr, error) {
+	n, ap, err := c.conn.ReadFromUDPAddrPort(buff)
+	if err != nil {
+		return n, nil, err
+	}
+	b := new(udpAddrBox)
+	ip := ap.Addr()
+	if ip.Is4() {
+		v4 := ip.As4()
+		copy(b.ip[:], v4[:])
+		b.addr.IP = b.ip[:net.IPv4len:net.IPv4len]
+	} else {
+		b.ip = ip.As16()
+		b.addr.IP = b.ip[:]
+		b.addr.Zone = ip.Zone()
+	}
+	b.addr.Port = int(ap.Port())
+	return n, &b.addr, nil
+}
+
+// writeToAddr пишет датаграмму по адресу без строкового представления и разбора;
+// WriteToUDPAddrPort, в отличие от WriteToUDP, не аллоцирует sockaddr.
+func (c *connection) writeToAddr(buf []byte, addr net.Addr) (int, error) {
+	a, ok := addr.(*net.UDPAddr)
+	if !ok {
+		return c.WriteTo(buf, addr.String())
+	}
+	ap := a.AddrPort()
+	return c.conn.WriteToUDPAddrPort(buf, netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port()))
 }
 
 func (c *connection) Write(buf []byte) (int, error) {
@@ -296,7 +337,10 @@ func receiveMessage(tr *transport, origMessage *CoAPMessage) (*CoAPMessage, erro
 	for {
 		tr.conn.SetReadDeadlineSec(origMessage.Timeout)
 
-		buff := make([]byte, MTU+1)
+		if tr.rbuf == nil {
+			tr.rbuf = make([]byte, MTU+1)
+		}
+		buff := tr.rbuf
 		n, err := tr.conn.Read(buff)
 		origMessage.Timeout = timeWait
 		if err != nil {

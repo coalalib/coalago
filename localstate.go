@@ -2,97 +2,135 @@ package coalago
 
 import (
 	"fmt"
-	"sync"
-	"sync/atomic"
-	"time"
 )
 
-var StorageLocalStates = newShardedCache(3 * time.Minute)
+// handleMessage обрабатывает входящее сообщение сервера: дедупликация, безопасность,
+// сборка блоков и обработчик ресурса. Слот семафора listenLoop освобождается после
+// приёма, до обработчика: семафор ограничивает приём, а обработчики, как и раньше, нет.
+func (s *Server) handleMessage(message *CoAPMessage, tr *transport, sem chan struct{}) {
+	k := messageKey(message)
+	if exchanges.processed(k) {
+		releaseSlot(sem)
+		return
+	}
 
-// ProcessedMessages — лёгкий дедупер уже обработанных запросов.
-// Ключ: sender+token, значение: struct{}{}. Запись живёт processedTTL и
-// нужна, чтобы отбросить запоздалые ретрансмиты без создания localState.
-var ProcessedMessages = newShardedCache(processedTTL)
+	// Handshake, coaps и блоки Block1 принимаются по одному на обмен, как под прежним
+	// мьютексом состояния обмена: повторный ClientHello видит сессию первого, блоки одного
+	// запроса собираются по очереди. Разные обмены друг друга не ждут, даже если приём
+	// одного встал на записи в сокет. Обычному coap-сообщению (keep-alive /a) сериализация
+	// не нужна: при приёме оно не меняет общего состояния.
+	var ready *CoAPMessage
+	if message.GetScheme() == COAPS_SCHEME || message.GetOption(OptionHandshakeType) != nil || message.GetOption(OptionBlock1) != nil {
+		l := exchangeLocks.lock(k)
+		ready = acceptMessage(tr, message, k)
+		exchangeLocks.unlock(k, l)
+	} else {
+		ready = acceptMessage(tr, message, k)
+	}
+	releaseSlot(sem)
 
-const processedTTL = 10 * time.Second
-
-type LocalStateFn func(*CoAPMessage)
-
-type Resourcer interface {
-	getResourceForPathAndMethod(path string, method CoapMethod) *CoAPResource
-}
-
-type localState struct {
-	mx              sync.Mutex
-	bufBlock1       map[int][]byte
-	totalBlocks     int
-	runnedHandler   int32
-	downloadStarted time.Time
-	r               Resourcer
-	tr              *transport
-}
-
-func newLocalState(r Resourcer, tr *transport) *localState {
-	return &localState{
-		bufBlock1:       make(map[int][]byte),
-		totalBlocks:     -1,
-		downloadStarted: time.Now(),
-		r:               r,
-		tr:              tr,
+	if ready != nil {
+		s.respond(ready, tr, k)
 	}
 }
 
-func (ls *localState) processMessage(message *CoAPMessage) {
-	ls.mx.Lock()
-	defer ls.mx.Unlock()
+// acceptMessage — приём сообщения до обработчика: безопасность, блоки Block1 и Block2.
+// Возвращает сообщение, готовое к обработке, или nil. Паника при приёме не роняет
+// процесс, как и прежде; паника обработчика ресурса — роняет, как и прежде.
+func acceptMessage(tr *transport, message *CoAPMessage, k exKey) (ready *CoAPMessage) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("panic in handler: %v\n", r)
+			ready = nil
+		}
+	}()
 
-	// Проверка безопасности
-	if ok, err := localStateSecurityInputLayer(ls.tr, message, ""); !ok || err != nil {
-		return
+	if ok, err := localStateSecurityInputLayer(tr, message, ""); !ok || err != nil {
+		return nil
 	}
 
 	MetricReceivedMessages.Inc()
 
-	// Локальный обработчик, запускаемый вне критической секции.
-	// Дедупликация ретрансмитов:
-	//   - первая прошедшая CAS горутина запускает хэндлер ровно один раз,
-	//     остальные (включая пришедшие во время выполнения) выходят сразу;
-	//   - после возврата из хэндлера запись из StorageLocalStates удаляется
-	//     сразу, а ключ кладётся в ProcessedMessages на processedTTL — там
-	//     его и ловят запоздалые ретрансмиты (см. Server.processLocalState).
-	localRespHandler := func(msg *CoAPMessage, err error) {
-		if !atomic.CompareAndSwapInt32(&ls.runnedHandler, 0, 1) {
-			return
+	if block := message.GetBlock1(); block != nil {
+		if message.Type != CON {
+			return nil
 		}
-		id := msg.Sender.String() + msg.GetTokenString()
-		defer func() {
-			StorageLocalStates.Delete(id)
-			ProcessedMessages.Set(id, struct{}{})
-		}()
-
-		if err != nil {
-			return
-		}
-
-		if bq.Has(msg) {
-			bq.Write(msg)
-			return
-		}
-
-		requestOnReceive(ls.r.getResourceForPathAndMethod(msg.GetURIPath(), msg.GetMethod()), ls.tr, msg)
+		return receiveBlock1(tr, message, block, k)
 	}
-	// Обновляем состояние (фрагментация/сборка блоков)
-	ls.totalBlocks, ls.bufBlock1 = localStateMessageHandlerSelector(ls.tr, ls.totalBlocks, ls.bufBlock1, message, localRespHandler)
+
+	if message.GetBlock2() != nil {
+		if message.Type == ACK {
+			// ACK блочного ответа — горутине, которая этот ответ отправляет.
+			tr.block2mu.Lock()
+			ch := tr.block2[k]
+			tr.block2mu.Unlock()
+			if ch != nil {
+				ch <- message
+			}
+		}
+		return nil
+	}
+
+	return message
 }
 
-func MakeLocalStateFn(r Resourcer, tr *transport, _ func(*CoAPMessage, error)) LocalStateFn {
-	ls := newLocalState(r, tr)
-	return ls.processMessage
+// respond запускает обработчик ресурса ровно один раз на обмен: повторы, пришедшие во
+// время работы обработчика и ещё processedTTL после ответа, отбрасываются.
+func (s *Server) respond(msg *CoAPMessage, tr *transport, k exKey) {
+	if !exchanges.claim(k) {
+		return
+	}
+	defer func() {
+		if msg.GetOption(OptionBlock1) != nil {
+			blockStates.delete(k)
+		}
+		exchanges.finish(k)
+	}()
+
+	if bq.Has(msg) {
+		bq.Write(msg)
+		return
+	}
+
+	requestOnReceive(s.resourceFor(msg), tr, msg)
+}
+
+// receiveBlock1 принимает очередной блок большого запроса (вызывается под замком
+// обмена). Возвращает собранное сообщение, когда пришли все блоки, иначе отвечает
+// Continue на блок.
+func receiveBlock1(tr *transport, message *CoAPMessage, block *block, k exKey) *CoAPMessage {
+	st := blockStates.get(k)
+	if st.assembled != nil {
+		return st.assembled
+	}
+
+	if !block.MoreBlocks {
+		st.totalBlocks = block.BlockNumber + 1
+	}
+	st.blocks[block.BlockNumber] = message.Payload.Bytes()
+	if st.totalBlocks == len(st.blocks) {
+		message.Payload = NewBytesPayload(assembleBlocks(st.blocks, st.totalBlocks))
+		st.assembled = message
+		st.blocks = nil
+		return message
+	}
+
+	var ack *CoAPMessage
+	if w := message.GetOption(OptionSelectiveRepeatWindowSize); w != nil {
+		ack = ackToWithWindowOffset(nil, message, CoapCodeContinue, w.IntValue(), block.BlockNumber, st.blocks)
+	} else {
+		ack = ackTo(nil, message, CoapCodeContinue)
+	}
+
+	if err := tr.sendToSocketByAddress(ack, message.Sender); err != nil {
+		fmt.Println("localStateMessageHandlerSelector error", err.Error())
+	}
+	return nil
 }
 
 func localStateSecurityInputLayer(tr *transport, message *CoAPMessage, proxyAddr string) (bool, error) {
 	if len(proxyAddr) > 0 {
-		proxyID, ok := getProxyIDIfNeed(proxyAddr, tr.conn.LocalAddr().String())
+		proxyID, ok := getProxyIDIfNeed(proxyAddr, tr.localAddr())
 		if ok {
 			proxyAddr = fmt.Sprintf("%v%v", proxyAddr, proxyID)
 		}
@@ -107,78 +145,4 @@ func localStateSecurityInputLayer(tr *transport, message *CoAPMessage, proxyAddr
 	}
 
 	return true, nil
-}
-
-func localStateMessageHandlerSelector(
-	sr *transport,
-	totalBlocks int,
-	buffer map[int][]byte,
-	message *CoAPMessage,
-	respHandler func(*CoAPMessage, error),
-) (int, map[int][]byte) {
-	block1 := message.GetBlock1()
-	block2 := message.GetBlock2()
-
-	if block1 != nil {
-		if message.Type == CON {
-			var (
-				ok  bool
-				err error
-			)
-			ok, totalBlocks, buffer, message, err = localStateReceiveARQBlock1(sr, totalBlocks, buffer, message)
-
-			if err != nil {
-				fmt.Println("localStateMessageHandlerSelector error", err.Error())
-			}
-
-			if ok {
-				go respHandler(message, err)
-			}
-		}
-		return totalBlocks, buffer
-	}
-
-	if block2 != nil {
-		if message.Type == ACK {
-			id := message.Sender.String() + string(message.Token)
-			if c, ok := sr.block2channels.Load(id); ok {
-				c.(chan *CoAPMessage) <- message
-			}
-		}
-		return totalBlocks, buffer
-	}
-	go respHandler(message, nil)
-	return totalBlocks, buffer
-}
-
-func localStateReceiveARQBlock1(sr *transport, totalBlocks int, buf map[int][]byte, inputMessage *CoAPMessage) (bool, int, map[int][]byte, *CoAPMessage, error) {
-	block := inputMessage.GetBlock1()
-	if block == nil || inputMessage.Type != CON {
-		return false, totalBlocks, buf, inputMessage, nil
-	}
-
-	if !block.MoreBlocks {
-		totalBlocks = block.BlockNumber + 1
-	}
-
-	buf[block.BlockNumber] = inputMessage.Payload.Bytes()
-	if totalBlocks == len(buf) {
-		b := assembleBlocks(buf, totalBlocks)
-		inputMessage.Payload = NewBytesPayload(b)
-		return true, totalBlocks, buf, inputMessage, nil
-	}
-
-	var ack *CoAPMessage
-	w := inputMessage.GetOption(OptionSelectiveRepeatWindowSize)
-	if w != nil {
-		ack = ackToWithWindowOffset(nil, inputMessage, CoapCodeContinue, w.IntValue(), block.BlockNumber, buf)
-	} else {
-		ack = ackTo(nil, inputMessage, CoapCodeContinue)
-	}
-
-	if err := sr.sendToSocketByAddress(ack, inputMessage.Sender); err != nil {
-		return false, totalBlocks, buf, inputMessage, err
-	}
-
-	return false, totalBlocks, buf, inputMessage, nil
 }

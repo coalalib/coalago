@@ -259,8 +259,23 @@ func (m *CoAPMessage) CloneOptions(cm *CoAPMessage, opts ...OptionCode) {
 }
 
 // Removes an Option
+//
+// Всегда новый срез, даже если удалять нечего: клон сообщения делит срез опций с
+// оригиналом, и AddOption после RemoveOptions не должен писать в общий массив. Ёмкость
+// с запасом под одну опцию — AddOption сразу её добавляет.
 func (m *CoAPMessage) RemoveOptions(id OptionCode) {
-	var opts []*CoAPMessageOption
+	keep := 0
+	for _, opt := range m.Options {
+		if opt.Code != id {
+			keep++
+		}
+	}
+	if keep == 0 {
+		m.Options = nil
+		return
+	}
+
+	opts := make([]*CoAPMessageOption, 0, keep+1)
 	for _, opt := range m.Options {
 		if opt.Code != id {
 			opts = append(opts, opt)
